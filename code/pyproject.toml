@@ -1,0 +1,18 @@
+[project]
+name = "code"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "mjlab",
+    "mujoco>=3.16.0",
+    "mujoco-warp>=3.16.0",
+    "tensorboard>=2.21.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "mjlab",
+]
+
+[tool.uv.sources]
+mjlab = { workspace = true, editable = true }
