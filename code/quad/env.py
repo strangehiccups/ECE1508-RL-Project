@@ -18,7 +18,9 @@ def quat_to_rotmat(q):
 
 
 class QuadHoverEnv:
-    def __init__(self, num_envs=1024, device="cuda:0", decimation=5):
+    def __init__(self, num_envs=1024, device=None, decimation=5):
+        if device is None:
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.n = num_envs
         self.dev = torch.device(device)
         self.decimation = decimation          # control dt = 5 * 0.002 = 0.01 s
@@ -84,7 +86,8 @@ class QuadHoverEnv:
         a = action.clamp(-1.0, 1.0)
         self.xfrc[:, self.drone_id, 0:3] = self.gust
         self.ctrl[:] = (self.hover * (1.0 + a) * self.thrust_scale).clamp(0.0, self.max_thrust)
-        torch.cuda.synchronize()
+        if self.dev.type == "cuda":
+            torch.cuda.synchronize()
         for _ in range(self.decimation):
             mjw.step(self.m, self.d)
         wp.synchronize()
