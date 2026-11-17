@@ -21,7 +21,7 @@ def run(script):
     assert Path(script).exists()
     exe = sys.executable
     if sys.platform == "darwin":
-        mjpython = Path(sys.executable).with_name("mjpython")
+        mjpython = Path(exe).with_name("mjpython")
         assert mjpython.exists(), "mjpython not found next to the Python interpreter; is mujoco installed?"
         exe = str(mjpython)
     subprocess.Popen([exe, script])

@@ -1,3 +1,4 @@
+import argparse
 import ctypes
 import sys
 import time
@@ -6,15 +7,25 @@ import torch
 import mujoco
 import mujoco.viewer
 from env import QuadHoverEnv, XML
-from policy import ActorCritic, RunningNorm
+from utils import load_ckpt
+from policy import EnvEncoder, ActorCritic, AdaptationModule
 
-env = QuadHoverEnv(num_envs=1)
-env.max_steps = 10**9                      # no 5 s timeout reset
-ckpt = torch.load("policy.pt", map_location=env.dev)
-model = ActorCritic().to(env.dev)
-model.load_state_dict(ckpt["model"])
-norm = RunningNorm(22, env.dev)
-norm.mean, norm.var = ckpt["mean"], ckpt["var"]
+ap = argparse.ArgumentParser()
+ap.add_argument("--ckpt", default="rma.pt")
+ap.add_argument("--mode", choices=["rma", "expert", "no_adapt"], default="rma",
+                help="rma: z_hat from the adaptation module (10 Hz); expert: z = mu(e); no_adapt: z = mu(0)")
+args = ap.parse_args()
+
+env = QuadHoverEnv(num_envs=1, resample_prob=0.0)   # no random re-draws of motor gains while playing
+env.max_steps = 10**9                               # essentially endless
+enc, policy, phi, norm, ADAPT_EVERY = load_ckpt(path=args.ckpt,
+                                                enc_type=EnvEncoder,
+                                                policy_type=ActorCritic,
+                                                adaptor_type=AdaptationModule,
+                                                device=env.device)
+assert args.mode != "rma" or phi is not None, "checkpoint has no adaptation module; run train.py --phase 2"
+z = enc(torch.zeros(1, env.force_dim, device=env.device))   # nominal extrinsics
+step_i = 0
 
 mjm = mujoco.MjModel.from_xml_path(XML)
 mjd = mujoco.MjData(mjm)
@@ -27,7 +38,7 @@ def reset_to_origin(ids):
     env.qpos[ids, 0:3] = env.target       # no random position offset
     env.thrust_scale[ids] = 1.0           # no random motor gain
 env.reset = reset_to_origin
-env.reset(torch.arange(env.n, device=env.dev))   # initial spawn at the target too
+env.reset(torch.arange(env.n, device=env.device))   # initial spawn at the target too
 
 # ---- keyboard input ------------------------------------------------------------
 # Both platforms expose the same held(key) function; everything below it is shared.
@@ -74,12 +85,12 @@ def pressed(vk):
 
 # Training randomizes a constant gust of up to 0.02 N per axis. Tested: the policy rides
 # out a steady push of up to ~0.08 N and crashes from ~0.10 N (the drone weighs ~0.26 N).
-RATE = 0.06          # N per second while a key is held (reaches MAX_PUSH in 1 s)
-MAX_PUSH = 0.06      # clamp on each force component, newtons
-DECAY_ON_RELEASE = True   # True: force returns to 0 when you let go
-dt = env.decimation * 0.002
+RATE = 0.06             # [N/s] disturbance force per second while a key is held (reaches MAX_PUSH in 1 s)
+MAX_PUSH = 0.06         # [N] disturbance force limit
+DECAY_ON_RELEASE = True # True: force returns to 0 when you let go
+dt = mjm.opt.timestep
 
-push = np.zeros(3)   # world-frame external force on the drone
+push = np.zeros(3)  # world-frame external force on the drone
 
 with mujoco.viewer.launch_passive(mjm, mjd, key_callback=key_callback) as v:
     obs = env.obs()
@@ -104,17 +115,25 @@ with mujoco.viewer.launch_passive(mjm, mjd, key_callback=key_callback) as v:
         if pressed(VK_ENTER):
             push[:] = 0.0
         if any([pressed(k) for k in RESET_KEYS]):   # list, so every key's state is updated
-            env.reset(torch.tensor([0], device=env.dev))
+            env.reset(torch.tensor([0], device=env.device))
             push[:] = 0.0
 
-        force = torch.tensor(push[None], dtype=torch.float32, device=env.dev)
+        force = torch.tensor(push[None], dtype=torch.float32, device=env.device)
         if hasattr(env, "gust"):            # if you applied the 6.3 randomization edit
             env.gust[:] = force
         else:
             env.apply_disturbance(force)
 
         with torch.no_grad():
-            a = model.dist(norm(obs)).mean
+            z_true = enc(env.privileged())
+            if args.mode == "expert":
+                z = z_true
+            elif args.mode == "rma" and step_i % ADAPT_EVERY == 0:    # phi at 10 Hz, policy at 100 Hz
+                z = phi(env.norm_hist(norm))
+            a = policy.dist(norm(obs), z).mean
+        if step_i % 100 == 0 and args.mode == "rma":
+            print(f"|z_hat - z| = {(z - z_true).norm().item():.3f}   (|z| = {z_true.norm().item():.3f})")
+        step_i += 1
         obs, _, _ = env.step(a)
         mjd.qpos[:] = env.qpos[0].cpu().numpy()
         mjd.qvel[:] = env.qvel[0].cpu().numpy()
