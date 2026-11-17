@@ -26,7 +26,7 @@ N = 2048    # envs
 H1 = 24     # rollout length
 EPOCHS1 = 5
 MINIBATCHES1 = 4
-GAMMA, LAM, CLIP, LR1 = 0.99, 0.95, 0.2, 3e-4
+GAMMA, LAMBDA, CLIP, LR1 = 0.99, 0.95, 0.2, 3e-4
 # phase 2 (supervised) ========================================================
 H2 = 16         # rollout length
 EPOCHS2 = 4
@@ -50,17 +50,17 @@ def phase1(env: QuadHoverEnv, iters: int):
 
     env.reset(torch.arange(N, device=device))
     obs = env.obs()
-    ep_ret = torch.zeros(N, device=device)
+    ep_return = torch.zeros(N, device=device)
 
     for it in range(iters):
         t0 = time.time()
         O = torch.zeros(H1, N, env.obs_dim, device=device)      # observations
-        E = torch.zeros(H1, N, env.force_dim, device=device)    # environmental forces (4 thrust + 3 gust)
+        E = torch.zeros(H1, N, env.env_dim, device=device)      # privileged environmental forces (motor gains, gust)
         A = torch.zeros(H1, N, env.n_actions, device=device)    # actions
-        LP = torch.zeros(H1, N, device=device)                  # ?
-        V = torch.zeros(H1, N, device=device)
-        R = torch.zeros(H1, N, device=device)
-        D = torch.zeros(H1, N, device=device)
+        LP = torch.zeros(H1, N, device=device)                  # log-probability of policy's actor action distributions
+        V = torch.zeros(H1, N, device=device)                   # policy's critic value estimates 
+        R = torch.zeros(H1, N, device=device)                   # (immediate) rewards
+        D = torch.zeros(H1, N, device=device)                   # termination/truncation flags
         finished = []
 
         for t in range(H1):
@@ -73,12 +73,12 @@ def phase1(env: QuadHoverEnv, iters: int):
                 a = d.sample()
                 O[t], E[t], A[t], V[t] = o, e, a, policy.value(o, z)
                 LP[t] = d.log_prob(a).sum(-1)
-            obs, rew, done = env.step(a)
-            R[t], D[t] = rew, done.float()
-            ep_ret += rew
+            obs, reward, done = env.step(a)
+            R[t], D[t] = reward, done.float()
+            ep_return += reward
             if done.any():
-                finished.append(ep_ret[done].clone())
-                ep_ret[done] = 0.0
+                finished.append(ep_return[done].clone())
+                ep_return[done] = 0.0
 
         with torch.no_grad():
             last_v = policy.value(norm(obs), enc(env.privileged()))
@@ -88,11 +88,11 @@ def phase1(env: QuadHoverEnv, iters: int):
             nonterm = 1.0 - D[t]
             next_v = V[t + 1] if t < H1 - 1 else last_v
             delta = R[t] + GAMMA * next_v * nonterm - V[t]
-            last = delta + GAMMA * LAM * nonterm * last
+            last = delta + GAMMA * LAMBDA * nonterm * last
             adv[t] = last
         ret = adv + V
 
-        o_f, e_f = O.reshape(-1, env.obs_dim), E.reshape(-1, env.force_dim)
+        o_f, e_f = O.reshape(-1, env.obs_dim), E.reshape(-1, env.env_dim)
         a_f, lp_f = A.reshape(-1, env.n_actions), LP.reshape(-1)
         adv_f, ret_f = adv.reshape(-1), ret.reshape(-1)
         B = o_f.shape[0]
@@ -135,14 +135,14 @@ def phase2(env: QuadHoverEnv, iters: int):
                                         device=device)
     for p in list(enc.parameters()) + list(policy.parameters()):
         p.requires_grad_(False)
-    phi = AdaptationModule().to(device)
-    opt = torch.optim.Adam(phi.parameters(), lr=LR2)
+    adaptor = AdaptationModule().to(device)
+    opt = torch.optim.Adam(adaptor.parameters(), lr=LR2)
     writer = SummaryWriter("runs/" + PHASE2_CKPT)
 
     env.reset(torch.arange(N, device=device))
     obs = env.obs()
     z_hat = torch.zeros(N, policy.z_dim, device=device)
-    step_i = 0                                            # global clock for the 10 Hz phi updates
+    step_i = 0                                            # global clock for the adaptor updates
 
     for it in range(iters):
         t0 = time.time()
@@ -150,15 +150,15 @@ def phase2(env: QuadHoverEnv, iters: int):
         Zb = torch.zeros(H2, N, policy.z_dim, device=device)                # targets mu(e_t)
         rew_sum = 0.0
 
-        # ---- on-policy rollout with z_hat from the (initially random) phi ----
+        # ---- on-policy rollout with z_hat from the (initially random) adaptor ----
         for t in range(H2):
             o = norm(obs)
             hn = env.norm_hist(norm)
             with torch.no_grad():
                 Zb[t] = enc(env.privileged())
-                if step_i % ADAPT_EVERY == 0:             # asynchronous: phi at 10 Hz, pi at 100 Hz
-                    z_hat = phi(hn)
-                a = policy.dist(o, z_hat).sample()         # sampled actions -> exploratory trajectories
+                if step_i % ADAPT_EVERY == 0:       # asynchronous adaptor and policy
+                    z_hat = adaptor(hn)
+                a = policy.dist(o, z_hat).sample()  # sampled actions -> exploratory trajectories
             Hb[t] = hn
             obs, rew, done = env.step(a)
             rew_sum += rew.mean().item()
@@ -168,13 +168,13 @@ def phase2(env: QuadHoverEnv, iters: int):
         Hf, Zf = Hb.reshape(-1, env.hist_len, env.obs_dim), Zb.reshape(-1, policy.z_dim)
         B = Hf.shape[0]
         with torch.no_grad():                             # error on fresh on-policy data (before the update)
-            pre_mse = F.mse_loss(phi(Hf), Zf).item()
+            pre_mse = F.mse_loss(adaptor(Hf), Zf).item()
         z_var = Zf.var(0).mean().item()
         for _ in range(EPOCHS2):
             perm = torch.randperm(B, device=device)
             for i in range(0, B, B // MINIBATCHES2):
                 idx = perm[i:i + B // MINIBATCHES2]
-                loss = F.mse_loss(phi(Hf[idx]), Zf[idx])
+                loss = F.mse_loss(adaptor(Hf[idx]), Zf[idx])
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
@@ -187,7 +187,7 @@ def phase2(env: QuadHoverEnv, iters: int):
               f"{N * H2 / (time.time() - t0):,.0f} steps/s")
 
         if it % 25 == 0 or it == iters - 1:
-            save_ckpt(FINAL_CKPT + ".pt", enc, policy, norm, phi, ADAPT_EVERY)
+            save_ckpt(FINAL_CKPT + ".pt", enc, policy, norm, adaptor, ADAPT_EVERY)
 
 
 if __name__ == "__main__":
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     ap.add_argument("--iters2", type=int, default=300)
     args = ap.parse_args()
 
-    env = QuadHoverEnv(num_envs=N)        # training distribution, resample_prob = 0.004
+    env = QuadHoverEnv(num_envs=N)
     if args.phase in ("1", "all"):
         phase1(env, args.iters1)
     if args.phase in ("2", "all"):
