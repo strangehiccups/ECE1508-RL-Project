@@ -18,13 +18,13 @@ args = ap.parse_args()
 
 env = QuadHoverEnv(num_envs=1, resample_prob=0.0)   # no random re-draws of motor gains while playing
 env.max_steps = 10**9                               # essentially endless
-enc, policy, phi, norm, ADAPT_EVERY = load_ckpt(path=args.ckpt,
-                                                enc_type=EnvEncoder,
-                                                policy_type=ActorCritic,
-                                                adaptor_type=AdaptationModule,
-                                                device=env.device)
-assert args.mode != "rma" or phi is not None, "checkpoint has no adaptation module; run train.py --phase 2"
-z = enc(torch.zeros(1, env.force_dim, device=env.device))   # nominal extrinsics
+enc, policy, adaptor, norm, ADAPT_EVERY = load_ckpt(path=args.ckpt,
+                                                    enc_type=EnvEncoder,
+                                                    policy_type=ActorCritic,
+                                                    adaptor_type=AdaptationModule,
+                                                    device=env.device)
+assert args.mode != "rma" or adaptor is not None, "checkpoint has no adaptation module; run train.py --phase 2"
+z = enc(torch.zeros(1, env.env_dim, device=env.device))   # nominal extrinsics
 step_i = 0
 
 mjm = mujoco.MjModel.from_xml_path(XML)
@@ -119,17 +119,14 @@ with mujoco.viewer.launch_passive(mjm, mjd, key_callback=key_callback) as v:
             push[:] = 0.0
 
         force = torch.tensor(push[None], dtype=torch.float32, device=env.device)
-        if hasattr(env, "gust"):            # if you applied the 6.3 randomization edit
-            env.gust[:] = force
-        else:
-            env.apply_disturbance(force)
+        env.apply_disturbance(force)
 
         with torch.no_grad():
             z_true = enc(env.privileged())
             if args.mode == "expert":
                 z = z_true
-            elif args.mode == "rma" and step_i % ADAPT_EVERY == 0:    # phi at 10 Hz, policy at 100 Hz
-                z = phi(env.norm_hist(norm))
+            elif args.mode == "rma" and step_i % ADAPT_EVERY == 0:
+                z = adaptor(env.norm_hist(norm))
             a = policy.dist(norm(obs), z).mean
         if step_i % 100 == 0 and args.mode == "rma":
             print(f"|z_hat - z| = {(z - z_true).norm().item():.3f}   (|z| = {z_true.norm().item():.3f})")

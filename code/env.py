@@ -65,18 +65,19 @@ class QuadHoverEnv:
 
         self.n_actions = mjm.nu                         # no. of control variables: 4 thrust values for 4 props
         self.mass = mujoco.mj_getTotalmass(mjm)         # [kg]
-        self.min_thrust = torch.tensor(mjm.actuator_ctrlrange[:, 0]).to(device)    # [N]
-        self.max_thrust = torch.tensor(mjm.actuator_ctrlrange[:, 1]).to(device)    # [N]
-        self.hover = self.mass * -mjm.opt.gravity[2] / self.n_actions   # [N] average force per prop required to keep quadrotor hovering 
+        self.min_thrust = torch.tensor(mjm.actuator_ctrlrange[:, 0]).to(device) # [N]
+        self.max_thrust = torch.tensor(mjm.actuator_ctrlrange[:, 1]).to(device) # [N]
+        self.hover = self.mass * -mjm.opt.gravity[2] / self.n_actions           # [N] average force per prop required to keep quadrotor hovering 
         self.prev_action = torch.zeros(num_envs, self.n_actions, device=self.device)
         self.steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)
 
         # for randomizing initial positions and orientations in reset()
-        self.gust = torch.zeros(num_envs, 3, device=self.device)                       # disturbance force
-        self.thrust_scale = torch.ones(num_envs, self.n_actions, device=self.device)   # per-motor gain
+        self.gust = torch.zeros(num_envs, 3, device=self.device)                        # disturbance force
+        self.thrust_scale = torch.ones(num_envs, self.n_actions, device=self.device)    # per-motor gain
+        self.manual_disturbance = torch.zeros(num_envs, 3, device=self.device)          # disturbance that can be injected during play
 
         # dimensions
-        self.force_dim = self.n_actions + self.gust.shape[1]
+        self.env_dim = self.privileged().shape[1]  # privileged environment info: "measured" motor gains + gust
         self.obs_dim = self.obs().shape[1]
         self.state_dim = self.obs_dim - self.n_actions
 
@@ -104,6 +105,7 @@ class QuadHoverEnv:
         self.steps[ids] = 0
         self.hist[ids] = 0.0
         self._sample_disturbance(ids)
+        self.manual_disturbance[ids] = 0.0
 
     def obs(self):
         pos_err = self.qpos[:, 0:3] - self.target
@@ -125,7 +127,7 @@ class QuadHoverEnv:
     # ---- disturbances --------------------------------------------------
     def apply_disturbance(self, force_world):
         """force_world: (N,3) tensor in newtons, applied to the drone body."""
-        self.xfrc[:, self.drone_id, 0:3] = force_world
+        self.manual_disturbance[:] = force_world
 
     # ---- step ----------------------------------------------------------
     def step(self, action):
@@ -136,8 +138,10 @@ class QuadHoverEnv:
         self.hist = torch.roll(self.hist, -1, dims=1)
         self.hist[:, -1] = entry
 
-        self.xfrc[:, self.drone_id, 0:3] = self.gust
+        # update simulator dynamics
+        self.xfrc[:, self.drone_id, 0:3] = self.gust + self.manual_disturbance
         self.ctrl[:] = (self.hover * (1.0 + a) * self.thrust_scale).clamp(self.min_thrust, self.max_thrust)
+        # step simulator
         if self.device == "cuda":
             torch.cuda.synchronize()
         for _ in range(self.decimation):
@@ -145,11 +149,13 @@ class QuadHoverEnv:
         wp.synchronize()
         self.steps += 1
 
+        # compute errors
         pos_err = self.qpos[:, 0:3] - self.target
         ang_vel = self.qvel[:, 3:6]
         R = quat_to_rotmat(self.qpos[:, 3:7])
         upright = R[:, 2, 2]                 # 1 = level, -1 = upside down
 
+        # compute reward
         reward = (1.0
                   - pos_err.norm(dim=-1)
                   - 0.05 * ang_vel.norm(dim=-1)

@@ -2,7 +2,7 @@
 Evaluate the RMA stack in simulation (analogue of Table II / Fig. S4 in the paper).
 
 Modes
-  expert    : z_t = mu(e_t)                    (privileged upper bound)
+  expert    : z_t = mu(e_t)                     (privileged upper bound)
   rma       : z_hat = phi(history), 10 Hz       (what gets deployed)
   no_adapt  : z = mu(0), the nominal extrinsics (base policy without the adaptation module)
 
@@ -18,24 +18,31 @@ Each mode sees identical environments (same RNG seed). Metrics are for the first
 import argparse
 import torch
 from env import QuadHoverEnv
-from policy import load_ckpt, norm_hist, ENV_DIM, ADAPT_EVERY
-
+from policy import EnvEncoder, ActorCritic, AdaptationModule
+from utils import RunningNorm, load_ckpt
 
 @torch.no_grad()
-def rollout(env, enc, model, phi, norm, mode, seed):
-    n, dev, T = env.n, env.dev, env.max_steps
+def rollout(env: QuadHoverEnv,
+            enc: EnvEncoder,
+            policy: ActorCritic,
+            adaptor: AdaptationModule,
+            norm: RunningNorm,
+            ADAPT_EVERY: int,
+            mode: str,
+            seed: int):
+    n, device, T = env.n, env.device, env.max_steps
     torch.manual_seed(seed)
-    env.reset(torch.arange(n, device=dev))
+    env.reset(torch.arange(n, device=device))
     obs = env.obs()
-    z_nom = enc(torch.zeros(1, ENV_DIM, device=dev)).expand(n, -1)
+    z_nom = enc(torch.zeros(1, env.env_dim, device=device)).expand(n, -1)
     z = z_nom
 
-    ended = torch.zeros(n, dtype=torch.bool, device=dev)
-    crashed_ever = torch.zeros(n, dtype=torch.bool, device=dev)
-    ttf = torch.ones(n, device=dev)
-    ret = torch.zeros(n, device=dev)
-    err_sum = torch.zeros(n, device=dev)
-    err_cnt = torch.zeros(n, device=dev)
+    ended = torch.zeros(n, dtype=torch.bool, device=device)
+    crashed_ever = torch.zeros(n, dtype=torch.bool, device=device)
+    ttf = torch.ones(n, device=device)
+    ret = torch.zeros(n, device=device)
+    err_sum = torch.zeros(n, device=device)
+    err_cnt = torch.zeros(n, device=device)
     zmse_sum, zmse_cnt = 0.0, 0.0
 
     for t in range(T):
@@ -44,12 +51,12 @@ def rollout(env, enc, model, phi, norm, mode, seed):
             z = z_true
         elif mode == "rma":
             if t % ADAPT_EVERY == 0:
-                z = phi(norm_hist(env.hist, norm))
+                z = adaptor(env.norm_hist(norm))
             zmse_sum += ((z - z_true) ** 2).mean(-1)[~ended].sum().item()
             zmse_cnt += (~ended).sum().item()
         else:
             z = z_nom
-        a = model.dist(norm(obs), z).mean                 # deterministic policy
+        a = policy.dist(norm(obs), z).mean                 # deterministic policy
         obs, rew, done = env.step(a)
 
         active = ~ended
@@ -80,14 +87,18 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     env = QuadHoverEnv(num_envs=args.envs, resample_prob=args.resample)
-    enc, model, phi, norm = load_ckpt(args.ckpt, env.dev)
-    modes = ["expert", "no_adapt"] + (["rma"] if phi is not None else [])
+    enc, policy, adaptor, norm, ADAPT_EVERY = load_ckpt(path=args.ckpt,
+                                                        enc_type=EnvEncoder,
+                                                        policy_type=ActorCritic,
+                                                        adaptor_type=AdaptationModule,
+                                                        device=env.device)
+    modes = ["expert", "no_adapt"] + (["rma"] if adaptor is not None else [])
 
-    print(f"{'scale':>5} {'mode':>9} {'success%':>9} {'ttf':>6} {'pos_err':>8} {'return':>8} {'z_mse':>8}")
+    print(f"{'mode':>9}\t{'randomisation factor':>5}\t{'success %':>9}\t{'time-to-fall [0,1]':>6}\t{'position error':>8}\t{'undiscounted return':>8}\t{'z-mse':>8}")
     for s in args.scales:
         env.rand_scale = s
         for mode in modes:
-            r = rollout(env, enc, model, phi, norm, mode, args.seed)
-            print(f"{s:5.1f} {mode:>9} {r['success']:9.1f} {r['ttf']:6.3f} {r['pos_err']:8.3f} "
-                  f"{r['return']:8.1f} {r['z_mse']:8.4f}")
+            r = rollout(env, enc, policy, adaptor, norm, ADAPT_EVERY, mode, args.seed)
+            print(f"{mode:>9}\t{s:5.1f}\t\t\t{r['success']:9.1f}\t{r['ttf']:6.3f}\t\t\t{r['pos_err']:8.3f}\t"
+                  f"{r['return']:8.1f}\t\t{r['z_mse']:8.4f}")
         print()
