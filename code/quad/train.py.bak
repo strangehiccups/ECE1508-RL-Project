@@ -1,0 +1,98 @@
+"""
+RMA training (Fig. 2 of Kumar et al. 2021)
+
+  Phase 1: PPO jointly trains the Env Factor Encoder mu and the Base Policy pi,
+           with privileged e_t: z_t = mu(e_t), a_t = pi(x_t, a_{t-1}, z_t)
+  Phase 2: supervised, on-policy training of the Adaptation Module phi (DAgger-style):
+           zhat_t = phi(x_{t-k:t-1}, a_{t-k:t-1}), the base policy is rolled out with zhat
+           (refreshed at 10 Hz) and phi regresses the true z_t = mu(e_t).
+
+  python train.py                 # phase 1 then phase 2
+  python train.py --phase 1       # -> rma_phase1.pt
+  python train.py --phase 2       # loads rma_phase1.pt -> rma.pt
+"""
+import argparse
+import time
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+from env import QuadHoverEnv
+from policy import EnvEncoder, ActorCritic, AdaptationModule
+
+N = 2048    # envs
+# phase 1 (PPO)
+H1 = 24     # rollout length
+EPOCHS1 = 5
+MINIBATCHES1 = 4
+GAMMA, LAM, CLIP, LR1 = 0.99, 0.95, 0.2, 3e-4
+# phase 2 (supervised)
+H2 = 16     # rollout length
+EPOCHS2 = 4
+MINIBATCHES2 = 4
+LR2 = 5e-4
+
+PHASE1_CKPT, FINAL_CKPT = "rma_phase1", "rma"
+
+class RunningNorm:
+    """Running mean/std observation normalizer on the GPU."""
+    def __init__(self, dim, device):
+        self.mean = torch.zeros(dim, device=device)
+        self.var = torch.ones(dim, device=device)
+        self.count = 1e-4
+
+    def update(self, x):
+        b_mean, b_var, b_n = x.mean(0), x.var(0), x.shape[0]
+        delta = b_mean - self.mean
+        tot = self.count + b_n
+        self.mean = self.mean + delta * b_n / tot
+        m2 = self.var * self.count + b_var * b_n + delta**2 * self.count * b_n / tot
+        self.var = m2 / tot
+        self.count = tot
+
+    def __call__(self, x):
+        return ((x - self.mean) / torch.sqrt(self.var + 1e-8)).clamp(-10, 10)
+
+# =============================================================================
+# Phase 1: base policy + env factor encoder with PPO
+# =============================================================================
+def phase1(env, iters):
+    dev = env.dev
+    enc, model = EnvEncoder().to(dev), ActorCritic().to(dev)
+    norm = RunningNorm(env.obs_dim, dev)
+    params = list(enc.parameters()) + list(model.parameters())
+    opt = torch.optim.Adam(params, lr=LR1)
+    writer = SummaryWriter("runs/rma_phase1")
+
+    env.reset(torch.arange(N, device=dev))
+    obs = env.obs()
+    ep_ret = torch.zeros(N, device=dev)
+
+    for it in range(iters):
+        t0 = time.time()
+        O = torch.zeros(H1, N, env.obs_dim, device=dev)     # observations
+        E = torch.zeros(H1, N, env.force_dim, device=dev)   # environment forces (4 thrust + 3 gust)
+        A = torch.zeros(H1, N, env.n_actions, device=dev)   # actions
+        LP = torch.zeros(H1, N, device=dev)                 # ?
+        V = torch.zeros(H1, N, device=dev)
+        R = torch.zeros(H1, N, device=dev)
+        D = torch.zeros(H1, N, device=dev)
+        finished = []
+
+        for t in range(H1):
+            norm.update(obs)
+            o = norm(obs)
+            e = env.privileged()
+            with torch.no_grad():
+                z = enc(e)
+                d = model.dist(o, z)
+                a = d.sample()
+                O[t], E[t], A[t], V[t] = o, e, a, model.value(o, z)
+                LP[t] = d.log_prob(a).sum(-1)
+            obs, rew, done = env.step(a)
+            R[t], D[t] = rew, done.float()
+            ep_ret += rew
+            if done.any():
+                finished.append(ep_ret[done].clone())
+                ep_ret[done] = 0.0
+
