@@ -1,0 +1,10 @@
+# Residual RMA (v2). Tested with Python 3.13 on Linux (CPU) and the versions below.
+mujoco==3.16.0
+mujoco-warp==3.16.0
+warp-lang==1.19.0
+torch>=2.5
+numpy>=2.0
+matplotlib>=3.8        # plots.py
+imageio>=2.30          # render.py
+imageio-ffmpeg>=0.5    # render.py (mp4)
+opencv-python>=4.8     # render.py (text overlay)

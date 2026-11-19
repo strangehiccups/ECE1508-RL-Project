@@ -1,0 +1,95 @@
+Warp 1.19.0 initialized:
+   CUDA not enabled in this build
+   Devices:
+     "cpu"      : "arm"
+   Kernel cache:
+     /Users/fm/Library/Caches/warp/1.19.0
+Module mujoco_warp._src.smooth bf75933 load on device 'cpu' took 0.62 ms  (cached)
+Module _nxn_broadphase__locals__kernel_2214e32d 42b0c31 load on device 'cpu' took 0.15 ms  (cached)
+Module _primitive_narrowphase__locals__primitive_narrowphase_3140f628 fe200ff load on device 'cpu' took 0.12 ms  (cached)
+Module mujoco_warp._src.constraint 3c4bce4 load on device 'cpu' took 0.09 ms  (cached)
+Module _friction_dof__locals__kernel_de3fc701 6c92011 load on device 'cpu' took 0.14 ms  (cached)
+Module _efc_contact_init__locals__kernel_2fbed541 49a2cd8 load on device 'cpu' took 0.13 ms  (cached)
+Module _efc_contact_jac_dense__locals__kernel_1686fae4 67347f4 load on device 'cpu' took 0.10 ms  (cached)
+Module _efc_contact_update__locals__kernel_a67f25cf 1dcb77c load on device 'cpu' took 0.09 ms  (cached)
+Module mujoco_warp._src.forward e81ae52 load on device 'cpu' took 0.14 ms  (cached)
+Module mujoco_warp._src.passive b81ef00 load on device 'cpu' took 0.13 ms  (cached)
+Module _qfrc_passive_kernel__locals__kernel_887f05a4 232356d load on device 'cpu' took 0.09 ms  (cached)
+Module _qfrc_smooth__locals__kernel_5d93552d 256e532 load on device 'cpu' took 0.09 ms  (cached)
+Module mujoco_warp._src.support 795a51f load on device 'cpu' took 0.08 ms  (cached)
+Module _small_cholesky_factorize_solve_block__locals__kernel_bbb3b6d0 16c43bb load on device 'cpu' took 0.08 ms  (cached)
+Module _solve_init_dof__locals__kernel_08db194e b859e27 load on device 'cpu' took 0.07 ms  (cached)
+Module mujoco_warp._src.solver 827b7a7 load on device 'cpu' took 0.10 ms  (cached)
+Module _solve_init_jaref_kernel__locals__kernel_b3e615d3 9740e1e load on device 'cpu' took 0.07 ms  (cached)
+Module mul_m_kernel__locals___mul_m_2eb0ef19 2c35d76 load on device 'cpu' took 0.07 ms  (cached)
+Module _update_constraint_efc__locals__kernel_01e3395a 42f786f load on device 'cpu' took 0.07 ms  (cached)
+Module _update_constraint_init_qfrc_constraint_dense__locals__kernel_1f63a94a ae6ee6f load on device 'cpu' took 0.07 ms  (cached)
+Module _update_gradient_zero_grad_dot__locals__kernel_eeeb13da abe3e46 load on device 'cpu' took 0.07 ms  (cached)
+Module _update_gradient_grad__locals__kernel_9654ebd0 1395f3e load on device 'cpu' took 0.07 ms  (cached)
+Module _update_gradient_JTDAJ_dense_tiled__locals__kernel_23798e9c c2e5862 load on device 'cpu' took 0.07 ms  (cached)
+Module _update_gradient_cholesky__locals__kernel_6d58067a c427393 load on device 'cpu' took 0.07 ms  (cached)
+Module _linesearch_iterative_kernel__locals__kernel_83807183 3abcf84 load on device 'cpu' took 0.08 ms  (cached)
+Module _update_constraint_efc__locals__kernel_81674199 b74e2ff load on device 'cpu' took 0.08 ms  (cached)
+Module _update_constraint_init_qfrc_constraint_dense__locals__kernel_8e350d39 e752cd6 load on device 'cpu' took 0.08 ms  (cached)
+Module _update_gradient_zero_grad_dot__locals__kernel_ba7e8e2f c890282 load on device 'cpu' took 0.07 ms  (cached)
+Module _update_gradient_grad__locals__kernel_4f2bb7a9 edeb759 load on device 'cpu' took 0.07 ms  (cached)
+Module _update_gradient_cholesky__locals__kernel_f23df9e0 dde472b load on device 'cpu' took 0.07 ms  (cached)
+Module _solve_done__locals__kernel_8d3e2217 2ffe032 load on device 'cpu' took 0.07 ms  (cached)
+Module _next_time_builder__locals___next_time_1cb22d2e 628d3cf load on device 'cpu' took 0.07 ms  (cached)
+[P1 res_z] it    0 scale 0.30 rew  0.361 ep_ret      4.3 crash  0.00 err 0.169 std 0.366 23,904 sps
+[P1 res_z] it   10 scale 0.35 rew  0.848 ep_ret    192.2 crash  0.00 err 0.032 std 0.362 28,131 sps
+[P1 res_z] it   20 scale 0.41 rew  0.847 ep_ret    385.9 crash  0.00 err 0.038 std 0.354 27,462 sps
+[P1 res_z] it   30 scale 0.46 rew  0.814 ep_ret    573.6 crash  0.00 err 0.046 std 0.342 28,136 sps
+[P1 res_z] it   40 scale 0.51 rew  0.775 ep_ret    748.1 crash  0.00 err 0.056 std 0.326 27,304 sps
+[P1 res_z] it   50 scale 0.56 rew  0.792 ep_ret    748.1 crash  0.00 err 0.053 std 0.314 26,699 sps
+[P1 res_z] it   60 scale 0.61 rew  0.842 ep_ret    736.4 crash  0.00 err 0.045 std 0.300 27,809 sps
+[P1 res_z] it   70 scale 0.67 rew  0.847 ep_ret    730.9 crash  0.00 err 0.043 std 0.293 27,359 sps
+[P1 res_z] it   80 scale 0.72 rew  0.856 ep_ret    752.5 crash  0.00 err 0.039 std 0.290 26,901 sps
+[P1 res_z] it   90 scale 0.77 rew  0.850 ep_ret    756.9 crash  0.00 err 0.038 std 0.288 27,431 sps
+[P1 res_z] it  100 scale 0.82 rew  0.869 ep_ret    769.3 crash  0.00 err 0.038 std 0.285 27,351 sps
+[P1 res_z] it  110 scale 0.88 rew  0.860 ep_ret    774.2 crash  0.00 err 0.040 std 0.282 26,925 sps
+[P1 res_z] it  120 scale 0.93 rew  0.814 ep_ret    771.8 crash  0.00 err 0.046 std 0.278 27,312 sps
+[P1 res_z] it  130 scale 0.98 rew  0.801 ep_ret    765.2 crash  0.00 err 0.048 std 0.269 26,894 sps
+[P1 res_z] it  140 scale 1.00 rew  0.805 ep_ret    744.0 crash  0.00 err 0.050 std 0.260 26,996 sps
+[P1 res_z] it  150 scale 1.00 rew  0.818 ep_ret    741.9 crash  0.00 err 0.050 std 0.251 26,287 sps
+[P1 res_z] it  160 scale 1.00 rew  0.797 ep_ret    726.6 crash  0.00 err 0.050 std 0.244 28,414 sps
+[P1 res_z] it  170 scale 1.00 rew  0.799 ep_ret    728.4 crash  0.00 err 0.048 std 0.239 27,762 sps
+[P1 res_z] it  180 scale 1.00 rew  0.807 ep_ret    725.3 crash  0.00 err 0.047 std 0.234 27,375 sps
+[P1 res_z] it  190 scale 1.00 rew  0.833 ep_ret    735.5 crash  0.00 err 0.046 std 0.228 27,771 sps
+[P1 res_z] it  200 scale 1.00 rew  0.819 ep_ret    755.8 crash  0.00 err 0.045 std 0.225 27,809 sps
+[P1 res_z] it  210 scale 1.00 rew  0.812 ep_ret    745.8 crash  0.00 err 0.046 std 0.219 28,511 sps
+[P1 res_z] it  220 scale 1.00 rew  0.829 ep_ret    736.1 crash  0.00 err 0.045 std 0.215 26,236 sps
+[P1 res_z] it  230 scale 1.00 rew  0.807 ep_ret    742.8 crash  0.00 err 0.046 std 0.210 27,115 sps
+[P1 res_z] it  240 scale 1.00 rew  0.840 ep_ret    741.8 crash  0.00 err 0.045 std 0.205 26,889 sps
+[P1 res_z] it  250 scale 1.00 rew  0.817 ep_ret    752.5 crash  0.00 err 0.046 std 0.199 27,950 sps
+[P1 res_z] it  260 scale 1.00 rew  0.822 ep_ret    744.9 crash  0.00 err 0.045 std 0.194 27,031 sps
+[P1 res_z] it  270 scale 1.00 rew  0.828 ep_ret    747.6 crash  0.00 err 0.044 std 0.190 26,373 sps
+[P1 res_z] it  280 scale 1.00 rew  0.822 ep_ret    754.7 crash  0.00 err 0.044 std 0.186 26,587 sps
+[P1 res_z] it  290 scale 1.00 rew  0.824 ep_ret    750.7 crash  0.00 err 0.044 std 0.183 27,702 sps
+[P1 res_z] it  300 scale 1.00 rew  0.831 ep_ret    752.5 crash  0.00 err 0.043 std 0.180 27,725 sps
+[P1 res_z] it  310 scale 1.00 rew  0.848 ep_ret    768.3 crash  0.00 err 0.043 std 0.176 26,202 sps
+[P1 res_z] it  320 scale 1.00 rew  0.844 ep_ret    764.1 crash  0.00 err 0.043 std 0.172 26,456 sps
+[P1 res_z] it  330 scale 1.00 rew  0.847 ep_ret    767.5 crash  0.00 err 0.042 std 0.168 26,230 sps
+[P1 res_z] it  340 scale 1.00 rew  0.841 ep_ret    764.5 crash  0.00 err 0.042 std 0.164 27,219 sps
+[P1 res_z] it  350 scale 1.00 rew  0.858 ep_ret    760.9 crash  0.00 err 0.043 std 0.161 26,638 sps
+[P1 res_z] it  360 scale 1.00 rew  0.861 ep_ret    774.3 crash  0.00 err 0.042 std 0.157 27,074 sps
+[P1 res_z] it  370 scale 1.00 rew  0.846 ep_ret    761.4 crash  0.00 err 0.042 std 0.154 28,644 sps
+[P1 res_z] it  380 scale 1.00 rew  0.841 ep_ret    772.7 crash  0.00 err 0.042 std 0.151 29,353 sps
+[P1 res_z] it  390 scale 1.00 rew  0.853 ep_ret    775.2 crash  0.00 err 0.042 std 0.148 29,551 sps
+[P1 res_z] it  399 scale 1.00 rew  0.849 ep_ret    763.3 crash  0.00 err 0.042 std 0.145 29,476 sps
+[P2 res_z] it    0 z_mse 54.3666 z_R2 -156.250 e_R2 -688.600 rew 0.294 2,895 sps
+[P2 res_z] it   10 z_mse 0.3706 z_R2 -0.028 e_R2 -123.391 rew 0.753 2,926 sps
+[P2 res_z] it   20 z_mse 0.3441 z_R2 0.042 e_R2 -106.548 rew 0.752 2,926 sps
+[P2 res_z] it   30 z_mse 0.3255 z_R2 0.085 e_R2 -112.896 rew 0.756 2,924 sps
+[P2 res_z] it   40 z_mse 0.2703 z_R2 0.233 e_R2 -23.372 rew 0.758 2,929 sps
+[P2 res_z] it   50 z_mse 0.2232 z_R2 0.363 e_R2 -20.935 rew 0.762 2,931 sps
+[P2 res_z] it   60 z_mse 0.1992 z_R2 0.410 e_R2 -18.111 rew 0.763 2,902 sps
+[P2 res_z] it   70 z_mse 0.1883 z_R2 0.465 e_R2 -26.300 rew 0.759 2,840 sps
+[P2 res_z] it   80 z_mse 0.1712 z_R2 0.508 e_R2 -30.790 rew 0.762 2,841 sps
+[P2 res_z] it   90 z_mse 0.1568 z_R2 0.545 e_R2 -44.725 rew 0.763 2,829 sps
+[P2 res_z] it  100 z_mse 0.1518 z_R2 0.560 e_R2 -57.993 rew 0.766 2,831 sps
+[P2 res_z] it  110 z_mse 0.1362 z_R2 0.598 e_R2 -68.734 rew 0.769 2,836 sps
+[P2 res_z] it  120 z_mse 0.1270 z_R2 0.624 e_R2 -87.553 rew 0.765 2,842 sps
+[P2 res_z] it  130 z_mse 0.1250 z_R2 0.633 e_R2 -76.510 rew 0.764 2,796 sps
+[P2 res_z] it  140 z_mse 0.1123 z_R2 0.679 e_R2 -55.407 rew 0.767 2,820 sps
+[P2 res_z] it  149 z_mse 0.1125 z_R2 0.670 e_R2 -46.986 rew 0.769 2,822 sps
