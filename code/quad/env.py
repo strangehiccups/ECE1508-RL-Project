@@ -51,6 +51,8 @@ class QuadHoverEnv:
         # for randomizing initial positions and orientations in reset()
         self.gust = torch.zeros(num_envs, 3, device=self.dev)
         self.thrust_scale = torch.ones(num_envs, 1, device=self.dev)
+        # extra force set via apply_disturbance(); added to the gust, kept across steps and resets
+        self.ext_force = torch.zeros(num_envs, 3, device=self.dev)
 
         self.reset(torch.arange(num_envs, device=self.dev))
 
@@ -78,13 +80,14 @@ class QuadHoverEnv:
 
     # ---- disturbances --------------------------------------------------
     def apply_disturbance(self, force_world):
-        """force_world: (N,3) tensor in newtons, applied to the drone body."""
-        self.xfrc[:, self.drone_id, 0:3] = force_world
+        """force_world: (N,3) or (3,) tensor in newtons, world frame. Added on top of the
+        random gust on every step until changed; pass zeros to clear."""
+        self.ext_force[:] = force_world
 
     # ---- step ----------------------------------------------------------
     def step(self, action):
         a = action.clamp(-1.0, 1.0)
-        self.xfrc[:, self.drone_id, 0:3] = self.gust
+        self.xfrc[:, self.drone_id, 0:3] = self.gust + self.ext_force
         self.ctrl[:] = (self.hover * (1.0 + a) * self.thrust_scale).clamp(0.0, self.max_thrust)
         if self.dev.type == "cuda":
             torch.cuda.synchronize()

@@ -1,0 +1,309 @@
+"""Default configuration for ProxQuad.
+
+Values tagged [CONFIRM] are proposals still awaiting team sign-off. Values tagged
+[dev_CCM] are copied from fsc_PegasusSimulator, branch dev_CCM:
+    extensions/fsc_aerial_manipulation/fsc_aerial_manipulation/rotorcraft/x650_params.py
+    .../rotorcraft/lagged_thrust_curve.py, application/px4_base/05_px4_single_drone_x650.py
+A `Range` is (low, high) for a uniform sample drawn once per episode, per env.
+"""
+
+from dataclasses import dataclass, field
+
+Range = tuple[float, float]
+Vec3 = tuple[float, float, float]
+
+
+# ---------------------------------------------------------------------------
+# Simulation
+# ---------------------------------------------------------------------------
+@dataclass
+class SimCfg:
+    num_envs: int = 4096
+    device: str | None = None        # None -> "cuda:0" if available, else "cpu"
+    xml: str = "two_x650.xml"        # file in ProxQuad/assets/ (sets the 0.002 s physics step)
+    decimation: int = 2              # physics steps per control step -> 250 Hz (2026-11-19)
+    episode_length_s: float = 15.0   # [CONFIRM]
+    # first episode of each env gets a random length, so time-outs do not all land
+    # on the same step (decorrelates rollouts); later episodes use the full length
+    stagger_first_episode: bool = True
+    use_cuda_graph: bool = True      # capture the decimation loop once, replay every step
+    nconmax: int = 16                # contacts per world (only drone-floor contacts exist)
+    njmax: int = 64                  # constraint rows per world
+
+
+# ---------------------------------------------------------------------------
+# X650 airframe and motors (both drones)
+# ---------------------------------------------------------------------------
+@dataclass
+class MotorCfg:
+    """MN4014 + 15x5" prop, bench-fit. Thrust f = k_f w^2 along rotor +z, yaw reaction
+    torque kappa * f * rot_dir (kappa = rolling-moment coeff / k_f, set as actuator gear in
+    the MJCF).
+
+    rotor_lag = False (confirmed 2026-11-18, for now): rotor speed = command, no delay.
+    rotor_lag = True: first-order lag, updated every physics step with the exact
+    zero-order-hold solution (dev_CCM LaggedQuadraticThrustCurve):
+        w[k+1] = w_cmd + (w[k] - w_cmd) exp(-lambda dt)
+    and the actual rotor speeds and lambda are added to e_t (envs/observations.py).
+    """
+    rotor_constant: float = 4.536223e-05     # k_f, N/(rad/s)^2              [dev_CCM]
+    rolling_moment_coeff: float = 8.366e-07  # N m/(rad/s)^2 (in MJCF gear)  [dev_CCM]
+    omega_idle: float = 81.8374            # rad/s at 0% throttle, armed     [dev_CCM]
+    omega_max: float = 817.5911            # rad/s at 100% throttle          [dev_CCM]
+    rotor_lag: bool = False
+    rotor_lambda: float = 10.51            # 1/s, tau ~ 95 ms (lag only)      [dev_CCM]
+    prop_radius: float = 0.1905            # m, 15" prop
+
+
+# ---------------------------------------------------------------------------
+# Bottom drone: pure RL, no base controller
+# ---------------------------------------------------------------------------
+@dataclass
+class ActionCfg:
+    """a in [-1, 1]^4 -> per-motor normalized throttle u = (a + 1) / 2 -> rotor speed
+    command w_cmd = w_idle + u (w_max - w_idle). Same interface as PX4 direct actuator
+    control (actuator_motors), on which rpm is linear in throttle. Hover is a ~ -0.08.
+    Motor order = PX4 Quad-X: front-right, rear-left, front-left, rear-right. [CONFIRM]
+    """
+    mapping: str = "throttle"   # only option implemented
+
+
+# ---------------------------------------------------------------------------
+# Top drone: nominal X650 on a geometric controller, no disturbances
+# ---------------------------------------------------------------------------
+@dataclass
+class ControllerCfg:
+    """Geometric (Lee) tracking controller -> rotor speed commands via the same
+    normalize-then-saturate allocation Pegasus uses (force_and_torques_to_velocities).
+
+    Attitude gains start from the dev_CCM X650 sweep (x650_attitude_sim/simulate.py:
+    b_omega = 4, b_r = 15; that law's e_r ~ 2 x rotation error, so k_R = 2 b_r = 30).
+    That sweep ran the controller every 2 ms physics step; at 100 Hz with a 10 ms hold
+    (the control rate until 2026-11-19; now 250 Hz, 4 ms hold), k_R = 30 is marginal: it
+    flips the drone whenever the rotor lag is
+    slower than lambda ~ 10.7/s. k_R = 20 (b_r = 10) flew 0 flips over the full
+    randomized inertia x [0.8, 1.6] and lambda [8.5, 12.5] range (2048 envs x 10 s).
+    Position gains are proposed here (dev_CCM has none for X650). [CONFIRM]
+    """
+    kp_pos: Vec3 = (4.0, 4.0, 6.0)       # 1/s^2 (acceleration per m)
+    kd_pos: Vec3 = (3.5, 3.5, 4.5)       # 1/s
+    ki_pos: Vec3 = (0.0, 0.0, 0.0)
+    int_limit: float = 0.5
+    k_R: Vec3 = (20.0, 20.0, 20.0)       # N m/rad
+    k_omega: Vec3 = (4.0, 4.0, 4.0)      # N m s/rad                      [dev_CCM]
+    max_tilt_deg: float = 30.0
+
+
+# ---------------------------------------------------------------------------
+# Scenarios: reference paths and start states of both drones (envs/scenarios.py)
+# ---------------------------------------------------------------------------
+@dataclass
+class BottomPathCfg:
+    target: Vec3 = (0.0, 0.0, 1.5)       # hover set-point of the bottom drone [CONFIRM]
+    init_pos_noise: float = 0.3          # +-m per axis around the reference at reset
+    init_vel_noise: float = 0.2          # +-m/s per axis around the reference at reset
+
+
+@dataclass
+class TopPathCfg:
+    """Scripted top-drone paths, placed around the bottom drone's TARGET. Scaled for the
+    X650: span (rotor tip to tip) ~1.03 m, rotor radius 0.19 m. [CONFIRM all ranges]
+    """
+    scenario_probs: dict[str, float] = field(default_factory=lambda: {
+        "hover_over": 0.3,             # holds a point above the target (full/partial overlap)
+        "pass_over": 0.3,              # flies straight across at constant speed
+        "approach_hover_leave": 0.3,   # ProxFly-style: approach, dwell, leave
+        "far": 0.1,                    # stays far away: no downwash (negative examples)
+    })
+    dz: Range = (0.5, 2.0)               # vertical separation of the hold point [m]
+    lateral_offset: Range = (0.0, 0.8)   # horizontal offset of the hold point [m]
+    speed: Range = (0.4, 1.0)            # approach/leave speed [m/s]
+    dwell: Range = (2.0, 5.0)            # hold duration for approach_hover_leave [s]
+    start_delay: Range = (0.0, 2.0)      # time before the top drone starts moving [s]
+    travel_distance: float = 2.5         # distance of start/end points from hold point [m]
+    far_distance: float = 4.0            # horizontal distance for the "far" scenario [m]
+    sway_amp: Range = (0.0, 0.1)         # horizontal sinusoidal sway of the path [m]
+    sway_freq: Range = (0.05, 0.3)       # [Hz]
+
+
+@dataclass
+class ScenarioCfg:
+    bottom: BottomPathCfg = field(default_factory=BottomPathCfg)
+    top: TopPathCfg = field(default_factory=TopPathCfg)
+    start_clearance: float = 1.25        # start outside the collision ellipsoid x this [CONFIRM]
+
+
+# ---------------------------------------------------------------------------
+# Body drag (plant, both drones): Pegasus default LinearDrag, F = -diag(c) v_body
+# ---------------------------------------------------------------------------
+@dataclass
+class DragCfg:
+    linear: Vec3 = (0.5, 0.3, 0.0)       # N/(m/s), body FLU            [dev_CCM default]
+
+
+# ---------------------------------------------------------------------------
+# Downwash of the top drone on the bottom drone (analytic). See envs/aero/.
+# ---------------------------------------------------------------------------
+@dataclass
+class WakeCfg:
+    """Velocity field produced by the top drone (Gaussian round-jet model)."""
+    model: str = "gaussian_jet"
+    sources: str = "rotors"          # "rotors": 4 superposed rotor jets | "body": one jet
+    sigma0_rotor: float = 0.7        # initial width of a rotor jet, in prop radii
+    sigma0_body: float = 1.0         # initial width of the merged jet, in arm lengths
+    spread_rate: Range = (0.15, 0.30)  # d(sigma)/ds, jet growth with downstream distance
+    speed_gain: Range = (0.8, 1.2)   # w0 = gain * momentum-theory induced velocity
+    onset_ramp: float = 0.1          # m, smooth 0->1 gate just below the wake source
+
+
+@dataclass
+class RotorCfg:
+    """Thrust of a bottom rotor under axial inflow w from the wake."""
+    model: str = "efficiency"            # "efficiency" (tier A) | "bemt" (tier B) [CONFIRM]
+    # tier A: ratio = clip(1 - efficiency_gain * w / v_hover, efficiency_min, 1)
+    efficiency_gain: Range = (0.3, 0.7)
+    efficiency_min: float = 0.3
+    # tier B: closed-form BEMT, ideal twist, uniform inflow, at the ACTUAL rotor speed.
+    # Hover thrust coefficient follows from k_f: C_T = k_f / (rho pi R^4) ~ 0.0090.
+    solidity: Range = (0.08, 0.12)       # 2 blades x chord / (pi R), 15x5" prop
+    lift_slope: float = 5.7              # per rad
+
+
+@dataclass
+class AeroCfg:
+    enabled: bool = True
+    air_density: float = 1.225
+    wake: WakeCfg = field(default_factory=WakeCfg)
+    rotor: RotorCfg = field(default_factory=RotorCfg)
+    airframe_cda: Range = (0.02, 0.06)  # drag coeff x area of the airframe in the wake [m^2]
+    # Turbulence: Ornstein-Uhlenbeck force/torque, std scaled by intensity |w_com| / v_h
+    turb_force_std: float = 0.05        # fraction of weight at intensity 1      [CONFIRM]
+    turb_torque_std: float = 0.015      # fraction of weight x arm at intensity 1 [CONFIRM]
+    turb_corr_time: float = 0.1         # s
+    # TODO(fidelity): delay the wake by its travel time (top-state ring buffer); design in
+    # README "Planned: wake transport delay"
+    transport_delay: bool = False
+    # planned: per-episode random scale on the travel time, so the policy cannot rely on
+    # one modelled delay; goes into e_t as wake_delay_scale           [CONFIRM range]
+    transport_delay_scale: Range = (0.5, 2.0)
+
+
+# ---------------------------------------------------------------------------
+# Domain randomization of the BOTTOM drone (per episode). The top drone is nominal.
+# ---------------------------------------------------------------------------
+@dataclass
+class RandomizationCfg:
+    # Nominal = MJCF: 3.25 kg, inertia 1.5 x CAD on all axes (hardware ID 2026-11-10:
+    # 3.387 kg, inside the mass range; roll/pitch ~1.5x CAD; yaw not measured).
+    mass_factor: Range = (0.85, 1.15)                                        # [CONFIRM]
+    # inertia: one factor shared by roll/pitch (xx, yy), one for yaw (zz); independent of
+    # mass and of each other. DomainRandomizer checks the triangle inequality on all
+    # range corners.
+    inertia_factor_xy: Range = (0.85, 1.15)
+    inertia_factor_z: Range = (0.85, 1.15)
+    motor_factor: Range = (0.9, 1.1)      # per rotor, scales k_f (thrust and yaw torque)
+    # CoM offset from the geometric center (body origin, where the rotor geometry and
+    # the air forces are referenced), uniform in +- this per body axis [m]
+    com_offset: Vec3 = (0.02, 0.02, 0.01)
+    rotor_lambda: Range = (8.5, 12.5)     # 1/s, around the bench 10.51 (rotor_lag only)
+    gust_force: float = 0.04              # +- fraction of weight, per axis, constant
+
+
+# ---------------------------------------------------------------------------
+# Reward, termination, observation
+# ---------------------------------------------------------------------------
+@dataclass
+class RewardCfg:
+    """r = survival - sum(w_k * penalty_k); see envs/rewards.py. To revisit with the
+    RL algorithm. [CONFIRM]
+
+    Rate terms are weights PER SECOND, integrated over the control step (x dt), so returns
+    do not depend on the control rate. The values equal the earlier per-step weights at
+    100 Hz x 100, i.e. the same return scale as before (15 s hover ~ 1500).
+    action_rate penalizes |da/dt| x dt = |a - a_prev| per step (total variation of the
+    action, rate-independent for smooth actions); crash is a one-off event.
+    """
+    survival: float = 100.0   # per second
+    pos: float = 100.0        # |p - p_ref| [m], per second
+    vel: float = 10.0         # |v - v_ref| [m/s], per second
+    att: float = 50.0         # 3 - trace(R_ref^T R), in [0, 4], per second
+    ang_vel: float = 5.0      # |omega - R^T R_ref omega_ref| [rad/s], per second
+    action: float = 0.0       # |a - a_hover|, per second
+    action_rate: float = 0.05  # |a - a_prev| per step (see above)
+    crash: float = 10.0       # one-off penalty on a crash
+
+
+@dataclass
+class TerminationCfg:
+    min_height: float = 0.2       # m
+    max_pos_err: float = 3.0      # m
+    min_upright: float = 0.2      # R_zz (cos of tilt); 0.2 ~ 78 deg
+    # drones collide if (d_xy / r_xy)^2 + (d_z / r_z)^2 < 1: r_xy ~ prop span, r_z ~
+    # frame height + rotor plane offset [CONFIRM]
+    collision_radii: tuple[float, float] = (1.03, 0.35)
+
+
+@dataclass
+class ObsCfg:
+    # Phase 2 histories, one per drone, in env steps (0 disables; Phase 1 needs neither).
+    # Both feed the adaptation module phi (RMA: 0.5 s = 125 steps at 250 Hz). Once the
+    # randomized transport delay is on, both must cover the longest
+    # delay (~3 s = 750 steps at 250 Hz, or a downsampled window / GRU; README "Planned").
+    bottom_history_len: int = 0
+    top_history_len: int = 0
+
+
+@dataclass
+class EnvCfg:
+    sim: SimCfg = field(default_factory=SimCfg)
+    motor: MotorCfg = field(default_factory=MotorCfg)
+    action: ActionCfg = field(default_factory=ActionCfg)
+    scenario: ScenarioCfg = field(default_factory=ScenarioCfg)
+    top_controller: ControllerCfg = field(default_factory=ControllerCfg)
+    drag: DragCfg = field(default_factory=DragCfg)
+    aero: AeroCfg = field(default_factory=AeroCfg)
+    randomization: RandomizationCfg = field(default_factory=RandomizationCfg)
+    reward: RewardCfg = field(default_factory=RewardCfg)
+    termination: TerminationCfg = field(default_factory=TerminationCfg)
+    obs: ObsCfg = field(default_factory=ObsCfg)
+
+
+# ---------------------------------------------------------------------------
+# Training (algorithm details are still open)
+# ---------------------------------------------------------------------------
+@dataclass
+class Phase1Cfg:
+    """Phase 1: jointly train env-factor encoder mu and base policy pi with RL."""
+    env: EnvCfg = field(default_factory=EnvCfg)
+    algorithm: str = "TBD"        # PPO / TRPO / ... (to be decided)
+    z_dim: int = 8                # mu(e_t: 24 dims) -> z_t (RMA uses 8)
+    iterations: int = 1000
+    rollout_steps: int = 60       # 0.24 s at 250 Hz (24 steps at 100 Hz before)
+    # discount: keep the horizon in seconds when the control rate changes,
+    # gamma_250Hz = gamma_100Hz ** 0.4 (0.99 -> 0.996); same for GAE lambda
+    seed: int = 0
+    log_dir: str = "runs/phase1"
+    checkpoint: str = "runs/phase1/model.pt"
+
+
+@dataclass
+class Phase2Cfg:
+    """Phase 2: train the adaptation module phi to regress z from both drones' histories.
+
+        z_hat_t = phi(bottom history, top history)  ~  z_t = mu(e_t)   (mu frozen)
+
+    Rates (2026-11-19): the policy acts every env step (250 Hz); phi refreshes z_hat every
+    `adaptation_decimation` = 2 steps (125 Hz, fast enough for the downwash in e_t) and
+    the policy reuses the latest z_hat in between, in training rollouts too. Histories:
+    0.5 s = 125 steps, as in RMA.
+    """
+    env: EnvCfg = field(default_factory=lambda: EnvCfg(
+        obs=ObsCfg(bottom_history_len=125, top_history_len=125)))
+    adaptation_decimation: int = 2
+    phase1_checkpoint: str = "runs/phase1/model.pt"
+    iterations: int = 1000
+    rollout_steps: int = 60       # 0.24 s at 250 Hz
+    lr: float = 5e-4
+    seed: int = 0
+    log_dir: str = "runs/phase2"
+    checkpoint: str = "runs/phase2/model.pt"

@@ -1,0 +1,164 @@
+"""End-to-end check of the environment.
+
+Run from code/:  python -m ProxQuad.scripts.smoke_test [--num-envs 4096] [--seconds 15]
+
+The env has no base controller, so this script flies the bottom drone with a stand-in
+policy: the same geometric controller the top drone uses (nominal model, no knowledge
+of the randomization or the downwash), converted to actions. It reports observation
+layouts and shapes, throughput, per-scenario tracking of both drones with downwash on vs
+off, crash reasons, and a check that mass randomization reaches MuJoCo.
+"""
+
+import argparse
+import time
+
+import torch
+
+from ..configs import EnvCfg, ObsCfg, SimCfg
+from ..envs import ProxQuadEnv
+from ..envs.controller import GeometricController
+from ..envs.observations import PROPRIO_LAYOUT, TOP_LAYOUT, TRACKING_LAYOUT, describe
+from ..envs.scenarios import SCENARIOS
+
+
+def run(num_envs: int, seconds: float, aero: bool, history: int) -> dict:
+    cfg = EnvCfg(sim=SimCfg(num_envs=num_envs),
+                 obs=ObsCfg(bottom_history_len=history, top_history_len=history))
+    cfg.aero.enabled = aero
+    env = ProxQuadEnv(cfg)
+    steps = round(seconds / env.dt)
+    ctrl = GeometricController(cfg.top_controller, env.bottom, env.dt, env.n, env.dev)
+
+    S, dev = len(SCENARIOS), env.dev
+    z = lambda: torch.zeros(S, device=dev)  # noqa: E731
+    err_sum, top_err_sum, cnt, crashes, episodes, sag_sum = z(), z(), z(), z(), z(), z()
+    min_ratio = torch.ones(S, device=dev)
+    sag = torch.zeros(env.n, device=dev)       # worst altitude drop below target, per env
+    reasons_total: dict[str, int] = {}
+    env.timing = {k: 0.0 for k in env.timing}
+
+    t0 = time.perf_counter()
+    for _ in range(steps):
+        kind = env.scenario.kind.clone()
+        ratio = env._aero.thrust_ratio.min(-1).values
+        bot_ref = env.scenario.bottom_reference(env.steps.float() * env.dt)
+        a = env.omega_to_action(ctrl(env._bot_state, bot_ref))
+        top_ref = env.scenario.top_reference(env.steps.float() * env.dt).pos
+        top_err = (env._top_state.pos - top_ref).norm(dim=-1)
+        _, _, done, info = env.step(a)
+        if done.any():
+            ctrl.reset(done.nonzero().squeeze(-1))
+        pos = env.qpos[:, 0:3]
+        err = (pos - env.scenario.target).norm(dim=-1)
+        settled = env.steps > round(2.0 / env.dt)
+        sag = torch.maximum(sag, env.scenario.target[2] - pos[:, 2])
+        err_sum.index_add_(0, kind, err * settled)
+        top_err_sum.index_add_(0, kind, top_err * settled)
+        cnt.index_add_(0, kind, settled.float())
+        min_ratio = torch.minimum(min_ratio, torch.ones(S, device=dev)
+                                  .scatter_reduce(0, kind, ratio, "amin"))
+        if done.any():
+            crashes.index_add_(0, kind[done], info["crashed"][done].float())
+            episodes.index_add_(0, kind[done], torch.ones_like(err[done]))
+            sag_sum.index_add_(0, kind[done], sag[done])
+            sag[done] = 0.0
+            for k, v in info["crash_reasons"].items():
+                reasons_total[k] = reasons_total.get(k, 0) + int(v.sum())
+    if dev.type == "cuda":
+        torch.cuda.synchronize()
+    wall = time.perf_counter() - t0
+    kind = env.scenario.kind                   # count unfinished episodes too
+    episodes.index_add_(0, kind, torch.ones_like(sag))
+    sag_sum.index_add_(0, kind, sag)
+
+    rows = []
+    for s, name in enumerate(SCENARIOS):
+        c, e = cnt[s].clamp_min(1), episodes[s].clamp_min(1)
+        rows.append((name, (err_sum[s] / c).item(), (top_err_sum[s] / c).item(),
+                     (sag_sum[s] / e).item(), min_ratio[s].item(),
+                     (crashes[s] / e).item(), int(episodes[s].item())))
+    return {"env": env, "wall": wall, "steps": steps, "reasons": reasons_total,
+            "rows": rows}
+
+
+def report(title: str, r: dict) -> None:
+    env = r["env"]
+    sps = env.n * r["steps"] / r["wall"]
+    print(f"\n== {title}: {env.n} envs x {r['steps']} steps, {sps:,.0f} env-steps/s "
+          f"(= {sps * env.dt:,.0f} s of flight per wall-clock s)")
+    print(f"   time split: physics {env.timing['physics']:.2f}s, "
+          f"aero {env.timing['aero']:.2f}s, total {r['wall']:.2f}s")
+    print(f"   {'scenario':22s} {'bottom |e_p|':>12s} {'top |e_p|':>10s} {'max sag':>8s} "
+          f"{'min ratio':>10s} {'crash rate':>10s} {'episodes':>9s}")
+    for name, e, te, sag, mr, cr, ep in r["rows"]:
+        print(f"   {name:22s} {e:12.3f} {te:10.3f} {sag:8.3f} {mr:10.3f} {cr:10.2%} {ep:9d}")
+    print(f"   crash reasons: {r['reasons']}")
+
+
+def mass_check(env: ProxQuadEnv) -> None:
+    """With ki = 0 a heavier / weaker-motored drone sags lower: z error should
+    anti-correlate with the true/nominal load ratio."""
+    settled = env.steps > round(3.0 / env.dt)
+    far = (env.scenario.kind == SCENARIOS.index("far")) & settled
+    if far.sum() < 10:
+        print("   (too few settled 'far' envs for the mass check)")
+        return
+    z_err = (env.qpos[:, 2] - env.scenario.target[2])[far]
+    load = (env.bottom.mass_factor / env.bottom.motor_factor.mean(-1))[far]
+    c = torch.corrcoef(torch.stack([z_err, load]))[0, 1].item()
+    print(f"   mass randomization check (settled 'far' envs, no downwash): "
+          f"corr(z error, load ratio) = {c:+.2f}  (expect strongly negative)")
+
+
+def com_check(env: ProxQuadEnv) -> None:
+    """In steady hover the rotor thrusts have no net torque about the CoM, so their
+    centroid sum(f_i r_i) / T lies on the CoM in xy. Recover the xy CoM offset from
+    the actual rotor thrusts and compare with the sampled one."""
+    settled = env.steps > round(3.0 / env.dt)
+    far = (env.scenario.kind == SCENARIOS.index("far")) & settled
+    if far.sum() < 10:
+        print("   (too few settled 'far' envs for the CoM check)")
+        return
+    f = env.bot_motors.thrust(env.bot_motors.omega)[far]          # (k, 4) true thrusts
+    r = env.bottom.rotor_pos                                       # (4, 3) body frame
+    T = f.sum(-1)
+    est = (f @ r[:, :2]) / T[:, None]                              # thrust centroid xy
+    true = env.bottom.com_offset[far, :2]
+    c = [torch.corrcoef(torch.stack([est[:, i], true[:, i]]))[0, 1].item() for i in range(2)]
+    rms = (est - true).pow(2).mean().sqrt().item()
+    print(f"   CoM randomization check (settled 'far' envs): offset recovered from rotor "
+          f"thrusts, corr x {c[0]:+.3f}, y {c[1]:+.3f}, rms error {1000 * rms:.2f} mm "
+          f"(expect ~ +1 and << {1000 * env.cfg.randomization.com_offset[0]:.0f} mm)")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--num-envs", type=int, default=4096)
+    ap.add_argument("--seconds", type=float, default=15.0, help="simulated time per run")
+    args = ap.parse_args()
+
+    on = run(args.num_envs, args.seconds, aero=True, history=125)
+    env = on["env"]
+    print(f"rotor lag: {env.cfg.motor.rotor_lag}")
+    print("tracking errors x~_t (pi):\n" + describe(TRACKING_LAYOUT))
+    print("true state x_t (bottom history):\n" + describe(PROPRIO_LAYOUT))
+    print("privileged e_t:\n" + describe(env.priv_layout))
+    print("top-drone obs:\n" + describe(TOP_LAYOUT))
+    obs = env.get_obs()
+    print(f"\nhover action a_hover = {env.a_hover:+.3f}, "
+          f"hover rotor speed = {env.bottom.omega_hover:.1f} rad/s")
+    print("obs shapes:", {k: tuple(v.shape) for k, v in obs.items()})
+    print("history shapes:", {k: tuple(v.shape) for k, v in env.get_history().items()})
+    for k, v in obs.items():
+        assert torch.isfinite(v).all(), f"non-finite values in obs[{k}]"
+    report("downwash ON, bottom flown by the geometric controller", on)
+    mass_check(env)
+    com_check(env)
+    del on, env, obs
+
+    off = run(args.num_envs, args.seconds, aero=False, history=0)
+    report("downwash OFF, bottom flown by the geometric controller", off)
+
+
+if __name__ == "__main__":
+    main()

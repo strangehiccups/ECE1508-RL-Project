@@ -1,0 +1,99 @@
+<mujoco model="prox_x650">
+  <!-- Two FSC X650 quadrotors. "bottom" = ego drone (RL policy), "top" = scripted drone.
+       Parameters from fsc_PegasusSimulator dev_CCM (rotorcraft/x650_params.py,
+       application/px4_base/05_px4_single_drone_x650.py) and isaacflight conf/airframe/x650.yaml:
+         total mass 3.25 kg (weighed, with battery; CCM app default),
+         diagonal inertia = 1.5 x CAD diag(0.05777498, 0.06408172, 0.065004565): the
+         2026-11-10 hardware ID measured roll/pitch ~1.5x CAD (CAD is not ground truth);
+         yaw was not measured and is scaled by the same 1.5 (assumption),
+         rotors at (+-0.229907, +-0.229907) m (650.3 mm diagonal), rotor plane 0.1313 m above
+         the CoM (USD: rotor links +0.0655 m, body CoM -0.0658 m from the body link).
+       Body frame FLU (x forward, y left, z up), frame origin = CoM.
+       Rotor order = PX4 Quad-X: m1 front-right, m2 rear-left, m3 front-left, m4 rear-right.
+       Euler: IMPLICITFAST is not supported by MJWarp. -->
+  <option timestep="0.002" integrator="Euler" gravity="0 0 -9.81"/>
+
+  <statistic center="0 0 2" extent="3"/>
+  <visual>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1"/>
+    <global azimuth="135" elevation="-20"/>
+  </visual>
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.55 0.7 0.9" rgb2="0.15 0.2 0.3"
+             width="256" height="256"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.8 0.8 0.8" rgb2="0.6 0.6 0.6"
+             width="512" height="512"/>
+    <material name="grid" texture="grid" texrepeat="20 20"/>
+  </asset>
+
+  <default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" mass="0"/>
+    </default>
+    <default class="rotor">
+      <site size="0.02"/>
+    </default>
+    <!-- ctrl = rotor thrust [N], computed in torch from the lagged rotor speed.
+         gear tz = kappa * rot_dir, kappa = rolling moment coeff / k_f = 8.366e-7 / 4.536223e-5,
+         rot_dir = (-1, -1, 1, 1) (Pegasus convention: CCW props give -z reaction torque). -->
+    <default class="thrust">
+      <motor ctrllimited="false"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 6" dir="0 0 -1" diffuse="0.5 0.5 0.5"/>
+    <geom name="floor" type="plane" size="20 20 0.1" material="grid"/>
+    <site name="target" pos="0 0 1.5" size="0.03" rgba="0.1 0.8 0.2 0.8"/>
+
+    <!-- ego drone (blue) -->
+    <body name="bottom" pos="0 0 1.5">
+      <freejoint name="bottom_root"/>
+      <inertial pos="0 0 0" mass="3.25" diaginertia="0.08666247 0.09612258 0.09750685"/>
+      <geom name="bottom_frame" type="box" size="0.15 0.15 0.08" rgba="0.2 0.4 0.9 1" mass="0"/>
+      <geom class="visual" type="capsule" fromto="-0.229907 -0.229907 0.1313 0.229907 0.229907 0.1313" size="0.012" rgba="0.2 0.2 0.2 1"/>
+      <geom class="visual" type="capsule" fromto="-0.229907 0.229907 0.1313 0.229907 -0.229907 0.1313" size="0.012" rgba="0.2 0.2 0.2 1"/>
+      <geom class="visual" type="cylinder" pos=" 0.229907 -0.229907 0.14" size="0.1905 0.003" rgba="0.9 0.2 0.2 0.5"/>
+      <geom class="visual" type="cylinder" pos="-0.229907  0.229907 0.14" size="0.1905 0.003" rgba="0.3 0.3 0.3 0.5"/>
+      <geom class="visual" type="cylinder" pos=" 0.229907  0.229907 0.14" size="0.1905 0.003" rgba="0.9 0.2 0.2 0.5"/>
+      <geom class="visual" type="cylinder" pos="-0.229907 -0.229907 0.14" size="0.1905 0.003" rgba="0.3 0.3 0.3 0.5"/>
+      <site class="rotor" name="bottom_m1" pos=" 0.229907 -0.229907 0.1313"/>
+      <site class="rotor" name="bottom_m2" pos="-0.229907  0.229907 0.1313"/>
+      <site class="rotor" name="bottom_m3" pos=" 0.229907  0.229907 0.1313"/>
+      <site class="rotor" name="bottom_m4" pos="-0.229907 -0.229907 0.1313"/>
+    </body>
+
+    <!-- scripted drone (orange) -->
+    <body name="top" pos="0 0 2.5">
+      <freejoint name="top_root"/>
+      <inertial pos="0 0 0" mass="3.25" diaginertia="0.08666247 0.09612258 0.09750685"/>
+      <geom name="top_frame" type="box" size="0.15 0.15 0.08" rgba="0.95 0.55 0.1 1" mass="0"/>
+      <geom class="visual" type="capsule" fromto="-0.229907 -0.229907 0.1313 0.229907 0.229907 0.1313" size="0.012" rgba="0.2 0.2 0.2 1"/>
+      <geom class="visual" type="capsule" fromto="-0.229907 0.229907 0.1313 0.229907 -0.229907 0.1313" size="0.012" rgba="0.2 0.2 0.2 1"/>
+      <geom class="visual" type="cylinder" pos=" 0.229907 -0.229907 0.14" size="0.1905 0.003" rgba="0.9 0.2 0.2 0.5"/>
+      <geom class="visual" type="cylinder" pos="-0.229907  0.229907 0.14" size="0.1905 0.003" rgba="0.3 0.3 0.3 0.5"/>
+      <geom class="visual" type="cylinder" pos=" 0.229907  0.229907 0.14" size="0.1905 0.003" rgba="0.9 0.2 0.2 0.5"/>
+      <geom class="visual" type="cylinder" pos="-0.229907 -0.229907 0.14" size="0.1905 0.003" rgba="0.3 0.3 0.3 0.5"/>
+      <site class="rotor" name="top_m1" pos=" 0.229907 -0.229907 0.1313"/>
+      <site class="rotor" name="top_m2" pos="-0.229907  0.229907 0.1313"/>
+      <site class="rotor" name="top_m3" pos=" 0.229907  0.229907 0.1313"/>
+      <site class="rotor" name="top_m4" pos="-0.229907 -0.229907 0.1313"/>
+    </body>
+  </worldbody>
+
+  <!-- drones never collide physically; proximity is a termination instead -->
+  <contact>
+    <exclude body1="bottom" body2="top"/>
+  </contact>
+
+  <actuator>
+    <motor class="thrust" name="bottom_u1" site="bottom_m1" gear="0 0 1 0 0 -0.0184427"/>
+    <motor class="thrust" name="bottom_u2" site="bottom_m2" gear="0 0 1 0 0 -0.0184427"/>
+    <motor class="thrust" name="bottom_u3" site="bottom_m3" gear="0 0 1 0 0  0.0184427"/>
+    <motor class="thrust" name="bottom_u4" site="bottom_m4" gear="0 0 1 0 0  0.0184427"/>
+    <motor class="thrust" name="top_u1" site="top_m1" gear="0 0 1 0 0 -0.0184427"/>
+    <motor class="thrust" name="top_u2" site="top_m2" gear="0 0 1 0 0 -0.0184427"/>
+    <motor class="thrust" name="top_u3" site="top_m3" gear="0 0 1 0 0  0.0184427"/>
+    <motor class="thrust" name="top_u4" site="top_m4" gear="0 0 1 0 0  0.0184427"/>
+  </actuator>
+</mujoco>
