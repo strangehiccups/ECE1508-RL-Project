@@ -44,10 +44,13 @@ ProxQuad/
 ├── models/                  μ, π + critic, φ (stubs)
 ├── algos/                   phase1.py, phase2.py (stubs: data flow only)
 ├── utils/                   rotation math, running normalizer
-└── scripts/                 smoke_test, inspect_downwash, train_phase1/2
+└── scripts/                 smoke_test, inspect_downwash, view_episode, train_phase1/2
 ```
 
 Run from `code/`: `python -m ProxQuad.scripts.smoke_test`, `python -m ProxQuad.scripts.inspect_downwash`.
+Watch an episode with the downwash drawn: `python -m ProxQuad.scripts.view_episode --scenario
+hover_over` (live window), or add `--video runs/videos/hover.mp4` to record an MP4 (works
+headless over SSH). The bottom drone is flown by the geometric controller until a policy exists.
 
 ## Decisions
 

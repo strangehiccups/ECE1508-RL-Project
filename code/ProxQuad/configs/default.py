@@ -176,7 +176,7 @@ class AeroCfg:
     wake: WakeCfg = field(default_factory=WakeCfg)
     rotor: RotorCfg = field(default_factory=RotorCfg)
     airframe_cda: Range = (0.02, 0.06)  # drag coeff x area of the airframe in the wake [m^2]
-    # Turbulence: Ornstein-Uhlenbeck force/torque, std scaled by intensity |w_com| / v_h
+    # Turbulence: Ornstein-Uhlenbeck force/torque, std scaled by intensity |w_center| / v_h
     turb_force_std: float = 0.05        # fraction of weight at intensity 1      [CONFIRM]
     turb_torque_std: float = 0.015      # fraction of weight x arm at intensity 1 [CONFIRM]
     turb_corr_time: float = 0.1         # s

@@ -27,7 +27,7 @@ class AeroOutput:
     force: torch.Tensor         # (N, 3) world-frame force, drag + turbulence [N]
     torque: torch.Tensor        # (N, 3) world-frame torque, turbulence [N m]
     rotor_inflow: torch.Tensor  # (N, 4) axial wake speed through each bottom rotor [m/s]
-    com_wake: torch.Tensor      # (N, 3) wake velocity at the bottom COM [m/s]
+    center_wake: torch.Tensor   # (N, 3) wake velocity at the bottom geometric center [m/s]
     drag: torch.Tensor          # (N, 3) deterministic part of `force`: airframe drag [N]
 
     @staticmethod

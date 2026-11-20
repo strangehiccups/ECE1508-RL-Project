@@ -21,13 +21,13 @@ class DownwashModel:
 
     Evaluated once per control step, before the policy acts, so the privileged vector
     e_t describes the disturbance over the next interval [t, t + dt):
-      1. wake velocity at the 4 bottom rotor hubs and at the bottom COM
+      1. wake velocity at the 4 bottom rotor hubs and at the bottom geometric center
       2. rotor thrust ratio from the axial inflow (rotor model), at the current rotor
          speed -> asymmetric when the wake covers only some rotors, which also produces
          roll/pitch torque. The env re-evaluates the ratio at every physics substep with
          the lagged rotor speed (matters for BEMT only).
-      3. airframe drag  F = 0.5 rho CdA |w| w  at the COM
-      4. turbulence: OU force/torque, std scaled by intensity |w_com| / v_h
+      3. airframe drag  F = 0.5 rho CdA |w| w  at the center
+      4. turbulence: OU force/torque, std scaled by intensity |w_center| / v_h
     The top drone feels nothing from the bottom one.
     """
 
@@ -73,19 +73,19 @@ class DownwashModel:
         inflow = (-(v[:, :4] * z_b[:, None, :]).sum(-1)).clamp_min(0.0)  # (N, 4)
         ratio = self.rotor.thrust_ratio(inflow, bp, bot_omega)
 
-        v_com = v[:, 4]
-        w_com = v_com.norm(dim=-1)
-        drag = (0.5 * rho * self.cda * w_com)[:, None] * v_com
+        v_center = v[:, 4]
+        w_center = v_center.norm(dim=-1)
+        drag = (0.5 * rho * self.cda * w_center)[:, None] * v_center
 
         # Ornstein-Uhlenbeck turbulence, exact discretization, unit stationary std
         a = math.exp(-dt / cfg.turb_corr_time)
         b = math.sqrt(1.0 - a * a)
         self.turb_f = a * self.turb_f + b * torch.randn_like(self.turb_f)
         self.turb_t = a * self.turb_t + b * torch.randn_like(self.turb_t)
-        intensity = (w_com / bp.hover_induced_velocity(rho))[:, None]
+        intensity = (w_center / bp.hover_induced_velocity(rho))[:, None]
         W = bp.weight_nom
         f_turb = cfg.turb_force_std * W * intensity * self.turb_f
         t_turb = cfg.turb_torque_std * W * bp.arm * intensity * self.turb_t
 
         return AeroOutput(thrust_ratio=ratio, force=drag + f_turb, torque=t_turb, drag=drag,
-                          rotor_inflow=inflow, com_wake=v_com)
+                          rotor_inflow=inflow, center_wake=v_center)
