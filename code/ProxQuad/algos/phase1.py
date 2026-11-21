@@ -13,6 +13,7 @@ import torch
 
 from ..configs import Phase1Cfg
 from ..envs import ProxQuadEnv
+from ..envs.observations import POLICY_INPUTS
 from ..models import BasePolicy, Critic, EnvFactorEncoder
 
 
@@ -22,15 +23,24 @@ class Phase1Trainer:
         self.cfg = cfg
         self.env = ProxQuadEnv(cfg.env)
         E = self.env
-        self.encoder = EnvFactorEncoder(E.priv_dim, cfg.z_dim).to(E.dev)
-        self.policy = BasePolicy(E.tracking_dim, E.action_dim, E.top_dim, cfg.z_dim).to(E.dev)
-        self.critic = Critic(E.priv_dim + E.tracking_dim + E.action_dim
-                             + E.top_dim).to(E.dev)  # TBD
-        # TODO: observation normalizers (utils.normalizer.RunningNorm) for x~_t, top, e_t
+        dims = dict(POLICY_INPUTS)
+        self.encoder = EnvFactorEncoder(E.priv_dim, cfg.z_dim, cfg.encoder).to(E.dev)
+        self.policy = BasePolicy(dims, cfg.z_dim, E.action_dim, cfg.policy, E.a_hover).to(E.dev)
+        self.critic = Critic(dims, E.priv_dim, cfg.critic).to(E.dev)
+
+    @torch.no_grad()
+    def update_norms(self, obs: dict[str, torch.Tensor]) -> None:
+        """Running obs statistics of all three networks, from a rollout's obs (stacked
+        over steps). Call AFTER the update on that rollout: its old log-probs and values
+        were computed with the current statistics. Also once before the first update
+        (warm-up rollout), so the input map does not jump after iteration 1."""
+        self.encoder.update_norm(obs["priv"])
+        self.policy.update_norm(obs)
+        self.critic.update_norm(obs)
 
     def act(self, obs: dict[str, torch.Tensor]):
         z = self.encoder(obs["priv"])
-        dist = self.policy(obs["tracking_err"], obs["prev_action"], obs["top"], z)
+        dist = self.policy(obs, z)
         return dist, z
 
     def collect_rollout(self):
@@ -48,7 +58,9 @@ class Phase1Trainer:
                     "cfg": self.cfg}, path)
 
     def train(self) -> None:
+        # TODO: warm-up rollout -> update_norms, before the loop
         for it in range(self.cfg.iterations):
             rollout = self.collect_rollout()
             stats = self.update(rollout)
+            # TODO: self.update_norms(rollout obs)
             # TODO: tensorboard logging of stats, reward terms, crash reasons per scenario

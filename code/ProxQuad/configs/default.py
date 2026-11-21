@@ -56,7 +56,7 @@ class MotorCfg:
 
 
 # ---------------------------------------------------------------------------
-# Bottom drone: pure RL, no base controller
+# Bottom drone: pure RL, no base controller (residual mode planned, README)
 # ---------------------------------------------------------------------------
 @dataclass
 class ActionCfg:
@@ -152,14 +152,14 @@ class WakeCfg:
     sigma0_rotor: float = 0.7        # initial width of a rotor jet, in prop radii
     sigma0_body: float = 1.0         # initial width of the merged jet, in arm lengths
     spread_rate: Range = (0.15, 0.30)  # d(sigma)/ds, jet growth with downstream distance
-    speed_gain: Range = (0.8, 1.2)   # w0 = gain * momentum-theory induced velocity
+    speed_gain: Range = (0.8, 2.0)   # w0 = gain * momentum-theory induced velocity
     onset_ramp: float = 0.1          # m, smooth 0->1 gate just below the wake source
 
 
 @dataclass
 class RotorCfg:
     """Thrust of a bottom rotor under axial inflow w from the wake."""
-    model: str = "efficiency"            # "efficiency" (tier A) | "bemt" (tier B) [CONFIRM]
+    model: str = "bemt"                  # "efficiency" (option A) | "bemt" (option B)
     # tier A: ratio = clip(1 - efficiency_gain * w / v_hover, efficiency_min, 1)
     efficiency_gain: Range = (0.3, 0.7)
     efficiency_min: float = 0.3
@@ -269,6 +269,52 @@ class EnvCfg:
 
 
 # ---------------------------------------------------------------------------
+# Networks (models/). Sizes from RMA; activations ELU (RMA does not state them).
+# ---------------------------------------------------------------------------
+@dataclass
+class PolicyCfg:
+    """pi: MLP -> mean of a diagonal Gaussian; log std is a learned state-independent
+    vector. spectral_norm: Lipschitz bound by construction (ablation, README)."""
+    hidden: tuple[int, ...] = (128, 128)
+    activation: str = "elu"           # must be 1-Lipschitz (elu / relu / tanh)
+    spectral_norm: bool = False
+    # spectral_norm only: L2 Lipschitz bound of the mean w.r.t. [obs in SI units, z]. The
+    # geometric controller at hover needs 1.4 (collective), 2.8 (roll / pitch), 28 (yaw)
+    lipschitz: float = 10.0
+    # shrinks the initial output (start near hover): spectral_norm: initial learned output
+    # gain tanh(rho); plain MLP: scale of the last layer's initial weights
+    init_out_gain: float = 0.05
+    init_std: float = 0.2             # throttle units
+    log_std_bounds: Range = (-5.0, 0.5)
+
+
+@dataclass
+class CriticCfg:
+    """V: separate MLP, asymmetric (raw e_t instead of z_t)."""
+    hidden: tuple[int, ...] = (256, 256)
+    activation: str = "elu"
+
+
+@dataclass
+class EncoderCfg:
+    """mu: e_t -> z_t (RMA: 256, 128)."""
+    hidden: tuple[int, ...] = (256, 128)
+    activation: str = "elu"
+
+
+@dataclass
+class AdaptationCfg:
+    """phi: per-drone 2-layer MLP step embedding -> both drones stacked as channels ->
+    1-D CNN over time -> linear -> z_hat (RMA)."""
+    embed_dim: int = 32                 # per drone -> 64 input channels
+    # (out_channels, kernel, stride). RMA: (32, 8, 4), (32, 5, 1), (32, 5, 1) over 50 steps
+    # at 100 Hz. First layer x 2.5 keeps its 80 ms kernel / 40 ms stride at 250 Hz, so 125
+    # steps give RMA's lengths 11 -> 7 -> 3.
+    conv: tuple[tuple[int, int, int], ...] = ((32, 20, 10), (32, 5, 1), (32, 5, 1))
+    activation: str = "elu"
+
+
+# ---------------------------------------------------------------------------
 # Training (algorithm details are still open)
 # ---------------------------------------------------------------------------
 @dataclass
@@ -277,6 +323,9 @@ class Phase1Cfg:
     env: EnvCfg = field(default_factory=EnvCfg)
     algorithm: str = "TBD"        # PPO / TRPO / ... (to be decided)
     z_dim: int = 8                # mu(e_t: 24 dims) -> z_t (RMA uses 8)
+    policy: PolicyCfg = field(default_factory=PolicyCfg)
+    critic: CriticCfg = field(default_factory=CriticCfg)
+    encoder: EncoderCfg = field(default_factory=EncoderCfg)
     iterations: int = 1000
     rollout_steps: int = 60       # 0.24 s at 250 Hz (24 steps at 100 Hz before)
     # discount: keep the horizon in seconds when the control rate changes,
@@ -300,6 +349,7 @@ class Phase2Cfg:
     env: EnvCfg = field(default_factory=lambda: EnvCfg(
         obs=ObsCfg(bottom_history_len=125, top_history_len=125)))
     adaptation_decimation: int = 2
+    adaptation: AdaptationCfg = field(default_factory=AdaptationCfg)
     phase1_checkpoint: str = "runs/phase1/model.pt"
     iterations: int = 1000
     rollout_steps: int = 60       # 0.24 s at 250 Hz

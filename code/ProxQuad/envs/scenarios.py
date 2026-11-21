@@ -42,8 +42,8 @@ class Scenarios:
         z3 = lambda: torch.zeros(num_envs, 3, device=device)  # noqa: E731
         z1 = lambda: torch.zeros(num_envs, device=device)     # noqa: E731
         self.kind = torch.zeros(num_envs, dtype=torch.long, device=device)
-        self.A, self.B, self.C = z3(), z3(), z3()
-        self.t0, self.t1, self.t2, self.t3 = z1(), z1(), z1(), z1()
+        self.A, self.B, self.C = z3(), z3(), z3()   # start, hold, end points of the top drone's reference path
+        self.t0, self.t1, self.t2, self.t3 = z1(), z1(), z1(), z1()    # start, hold, dwell, end times of the top drone's reference path
         self.sway_dir, self.sway_amp, self.sway_w, self.sway_phase = z3(), z1(), z1(), z1()
 
     def resample(self, ids: torch.Tensor) -> None:
@@ -89,7 +89,7 @@ class Scenarios:
         self.sway_phase[ids] = 2 * math.pi * torch.rand(k, device=dev)
 
     def bottom_reference(self, t: torch.Tensor) -> FlatRef:
-        """Hover at the target; acc, jerk and yaw left as None (= 0)."""
+        """Hover at the target for now; acc, jerk and yaw left as None (= 0)."""
         pos = self.target.expand(self.n, 3)
         return FlatRef(pos=pos, vel=torch.zeros_like(pos))
 

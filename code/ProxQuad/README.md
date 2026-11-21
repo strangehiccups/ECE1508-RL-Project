@@ -21,8 +21,8 @@ with rotor lag) holds what cannot be measured: the bottom drone's parameters, th
 settings and the downwash over the next step. φ reads both drones' histories: the top one
 lets it tell "heavy" from "in the wake" and predict the downwash.
 
-**Status:** environment built and smoke-tested. Networks (`models/`) and training loops
-(`algos/`) are interface stubs until the RL algorithm and architectures are decided.
+**Status:** environment built and smoke-tested; networks μ, π, critic, φ implemented
+(`models/`). Training loops (`algos/`) are stubs until the RL algorithm is decided.
 
 ## Layout
 
@@ -41,7 +41,7 @@ ProxQuad/
 │   ├── rewards.py           reward terms + terminations
 │   ├── history.py           Phase 2 history buffers
 │   └── aero/                downwash: wake model + rotor model + drag + turbulence
-├── models/                  μ, π + critic, φ (stubs)
+├── models/                  μ, π (+ optional spectral norm) + critic, φ
 ├── algos/                   phase1.py, phase2.py (stubs: data flow only)
 ├── utils/                   rotation math, running normalizer
 └── scripts/                 smoke_test, inspect_downwash, view_episode, train_phase1/2
@@ -67,7 +67,8 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   steps; discount for the chosen algorithm: γ_250 = γ_100^0.4. Physics cost per simulated
   second is unchanged; the per-control-step work (aero, controller, obs, policy) runs 2.5×
   as often.
-- Bottom drone: **pure RL**, no base controller, no residual.
+- Bottom drone: **pure RL**, no base controller. A residual mode on a geometric
+  controller is planned (below).
 - Bottom drone's task (2026-11-20): track a **flat-output reference** (`FlatRef`: pos,
   vel, acc, jerk, yaw, yaw_dot), for now **hover** at the target with yaw 0. Flatness
   gives the reference attitude and body rate (`controller.flat_attitude`: thrust along
@@ -93,6 +94,18 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   is redrawn (fallback: start on the reference, which `dz ≥ 0.5 m` keeps clear). Before
   this, ~0.2 % of episodes started in collision and ended on their first step.
 - Downwash: analytic model.
+- Rotor model (2026-11-20): **BEMT** (option B), not the linear efficiency law (option A,
+  its linearization at hover). Same cost; BEMT gets the larger loss in a strong wake
+  (8 points more thrust lost at inflow = v_h, directly under a top rotor) and the
+  rotor-speed dependence (a rotor spinning up loses relatively less), and its random
+  parameter (solidity) is measurable. Its linearized loss slope is only
+  k_η = σa / (σa + 16 λ_h) = 0.30–0.39 over σ ∈ [0.08, 0.12], vs [0.3, 0.7] for option A,
+  so the robustness margin moved to the wake: `WakeCfg.speed_gain` [0.8, 1.2] → [0.8, 2.0].
+  Gain 2 is roughly a jet whose momentum flux equals the rotor thrust (σ0 = 0.7 R with
+  w0 = v_h carries only ~25 % of it). The wake gain also scales drag, turbulence and,
+  once added, the transport speed consistently, which a margin on the rotor side would
+  not. At the midpoint (1.4) the lift loss is close to the old defaults'; over the range
+  it spans ~0.6–1.8× that.
 - Inertia randomization: two independent factors, roll/pitch (xx = yy) ×[0.85, 1.15] and
   yaw (zz) ×[0.85, 1.15]; both are in e_t.
 - Nominal inertia = 1.5 × CAD on all three axes. The 2026-11-10 hardware ID measured
@@ -135,6 +148,81 @@ the top drone directly) would compensate for downwash that has not arrived yet. 
   and the Phase 2 policy with s_τ outside the training range (e.g. 2.5): measure early
   compensation (climb before the wake arrives).
 
+Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCfg` /
+`AdaptationCfg`), following RMA; activations ELU (RMA does not state them):
+- μ: e_t (24) → 256 → 128 → z (8), linear output.
+- π: [x̃_t, a_{t-1}, o_t^top] (44) + z (8) → 128 → 128 → 4. Diagonal Gaussian: the network
+  gives the mean, log σ is a learned vector independent of the state (no variance
+  network; PPO-style, as in `code/quad`), σ₀ = 0.2 throttle, clamped to e^[−5, 0.5].
+  Phase 2 and deployment use the mean.
+- Spectral normalization of π is a **switch**, `PolicyCfg.spectral_norm` (2026-11-20),
+  **off** by default, kept for an ablation (tracking, action smoothness, measured slope
+  with vs without). Any MLP with 1-Lipschitz activations is Lipschitz continuous; the
+  switch only fixes the constant before training. Off: plain MLP, obs centered and
+  scaled by the running mean / std, last-layer weights × `init_out_gain` (0.05) and zero
+  bias so π starts at hover. Check after training: `BasePolicy.lipschitz_bound()`
+  (product of the exact layer norms; certified but loose) and the largest
+  |∂ mean / ∂ [obs, z]|₂ over visited states (what sets the noise sensitivity in flight;
+  LipSDP if a tight certified number is needed). Without the switch the bound is in
+  normalized units; in SI units it is × max 1/std, dominated by near-constant inputs: at
+  init (normalizer fed reset states only, R = I exactly) max 1/std = 3000 and the
+  measured slope in SI units is 26, vs 0.11 with the switch on.
+- With the switch on, π is **Lipschitz** by construction: every layer is spectrally normalized
+  (`torch.nn.utils.parametrizations.spectral_norm`, one power iteration per training
+  forward) and scaled by K^(1/3), activations are 1-Lipschitz, so
+  |mean(x) − mean(x')|₂ ≤ K |x − x'|₂ with K = `PolicyCfg.lipschitz` = 10. The bound also
+  covers ẑ, so φ's estimation error moves the action by at most K |ẑ − z|.
+  - Units: π's obs are only centered by a running mean, not divided by a running std, so
+    the bound holds in the obs layout's SI units (m, m/s, rad/s, R entries) and does not
+    move with the statistics. A std scaling would multiply it by 1/std of the quietest
+    feature (R's diagonal in hover: std ~1e-3).
+  - Choice of K: the geometric controller's Jacobian at hover in these units has
+    singular values 1.4 (collective), 2.8 (roll / pitch), 28 (yaw: the drag-torque arm
+    is 1.8 cm, so yaw needs large differential commands). The product-of-norms bound is
+    loose (a random-init network reaches ~1/5 of it), so K = 10 leaves room for
+    roll / pitch / thrust and softens yaw.
+  - Output gain: spectral normalization undoes the usual small init of the last layer;
+    with it the untrained mean was 0.6 (std per motor) off hover and 90 % of episodes
+    crashed within 0.4 s. The output is multiplied by a learned g = tanh(ρ), |g| ≤ 1 (so
+    the bound stays K), starting at 0.05: the untrained π then flies like hover + the
+    exploration noise. `BasePolicy.lipschitz_bound()` reports |g| × the exact product of
+    the layer norms (to log during training).
+- Critic: separate MLP 256 → 256, asymmetric: [x̃_t, a_{t-1}, o_t^top, e_t] with the raw
+  e_t, not μ, so the value loss does not shape z.
+- φ: per-step 2-layer MLP embedding (32) **per drone**, the two stacked as 64 channels,
+  then RMA's 3 × 1-D conv → flatten → linear. Every conv layer mixes both drones at each
+  time step (telling mass from wake needs their correlation). First conv kernel / stride
+  8 / 4 → 20 / 10 keeps RMA's 80 ms / 40 ms at 250 Hz; 125 steps give RMA's lengths
+  11 → 7 → 3.
+- Normalizers (`utils.normalizer.RunningNorm`, an nn.Module) live inside each network, so
+  checkpoints carry them. Phase 1 updates μ's, π's and the critic's from each rollout
+  (`Phase1Trainer.update_norms`); Phase 2 freezes them and updates only φ's.
+  - Order: update the statistics **after** the PPO update on a rollout, not between
+    collecting it and updating. The rollout's old log-probs and values were computed with
+    the old statistics; new ones would make the ratio ≠ 1 before any parameter changed.
+  - Warm-up: one rollout that only feeds the statistics before the first update. The
+    initial statistics are the identity map, so without it π's input map jumps after
+    iteration 1.
+  - Statistics are cumulative: each rollout weighs 1/k at iteration k (245 k samples per
+    rollout at 4096 envs × 60 steps), so the input map settles within tens of iterations;
+    early, crash-heavy data stays in the average. Stopping the updates after N iterations
+    would make it fully stationary if needed.
+- Sizes: μ 40 k, π 24 k, critic 84 k, φ 56 k parameters; μ + π + critic forward and
+  sample at 4096 envs ≈ 1.8 ms.
+
+Planned (not yet): **residual mode** (2026-11-20, deferred by the user). `ActionCfg.mode`
+= "direct" | "residual". Residual: a geometric controller on the bottom drone with
+nominal parameters (own `ControllerCfg`, ki = 0 so it holds no state π cannot see) gives
+a_base,t at s_t; π outputs d_t and the env applies a_t = clip(a_base,t + s·d_t).
+- Composed in the env, at the per-motor level: the RL action stays d ∈ [−1, 1]⁴ in both
+  modes (same Gaussian, σ, clamping); a_{t-1}, φ's history and the action-rate penalty
+  keep the applied command. π gets a_base,t as an extra input; its output starts at 0
+  (= the controller) instead of hover; σ₀ in throttle units is divided by s.
+- s = 0.5 (±184 rad/s): the default wake takes 33 % of the lift at 0.5 m directly below;
+  with +15 % mass and −10 % motors the residual alone needs Δa ≈ 0.43, so 0.3 is too small.
+- Optional reward term |d| to keep π close to the controller.
+- Evaluation baseline: the controller alone (d = 0).
+
 Planned (not yet): **bottom trajectory tracking**. The flat-reference plumbing is in
 place; `Scenarios.bottom_reference(t)` returns hover. Before trajectories train:
 - Bottom path kinds in `Scenarios`. Top paths are absolute (placed around the fixed
@@ -174,7 +262,11 @@ Open (tagged `[CONFIRM]` in `configs/default.py`):
 4. Top-drone scenario ranges: vertical gap 0.5–2.0 m, lateral offset 0–0.8 m, speed 0.4–1.0 m/s.
 5. Top-drone position gains (dev_CCM has none for X650); attitude gain lowered from the
    dev_CCM k_R = 30 to 20, needed when the rotor lag is on (see `ControllerCfg`).
-6. Downwash calibration (below), rotor model tier (efficiency vs BEMT), reward weights.
+6. Downwash calibration (below), reward weights.
+7. Spectral norm on π (off; ablation) and its bound K = 10; the critic's inputs
+   (asymmetric, raw e_t).
+8. RL algorithm. π's state-independent σ assumes PPO / TRPO; SAC would need a tanh-squashed
+   Gaussian with a state-dependent log σ head.
 
 ## X650 model (from dev_CCM)
 
@@ -192,8 +284,9 @@ Open (tagged `[CONFIRM]` in `configs/default.py`):
 Two swappable parts (`envs/aero/`), evaluated once per control step:
 - **Wake** (`wake.py`): momentum-conserving Gaussian round jet from each top rotor (or one
   merged jet), axis along the top drone's thrust axis; random spread rate and speed gain.
-- **Rotor** (`rotor.py`): thrust ratio of each bottom rotor under axial inflow. Tier A is a
-  linear efficiency law. Tier B is closed-form BEMT at the actual (lagged) rotor speed.
+- **Rotor** (`rotor.py`): thrust ratio of each bottom rotor under axial inflow. Default:
+  option B, closed-form BEMT at the actual (lagged) rotor speed. Option A, a linear
+  efficiency law, is kept for comparison.
 - Plus airframe drag in the wake and Ornstein–Uhlenbeck turbulence scaled by wake strength.
 
 Cost at 4096 envs: 0.8–1.0 ms per control step for any variant, vs 2.1 ms for physics.
@@ -201,6 +294,8 @@ CFD-grade models cannot run in the loop. They (or flight data) are for calibrati
 model or fitting the learned-surrogate stub (`surrogate.py`).
 
 **Calibration needed.** `inspect_downwash` prints lift loss and tilt torque on a
-separation grid. With current defaults the lift loss is still 11–16 % of weight at 3 m,
-which is probably too long-ranged. Needs reference data (published measurements or our
-own flights).
+separation grid. With current defaults (rotor jets, BEMT, random parameters at their
+midpoints) the lift loss is still 13–16 % of weight at 3 m below and within 0.5 m
+laterally (8–23 % on-axis over the speed-gain range), which is probably too long-ranged.
+Needs reference data (published measurements or our own flights); the data should set
+the `speed_gain` range, which is wide on purpose until then.

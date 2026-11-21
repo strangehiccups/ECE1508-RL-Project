@@ -17,6 +17,7 @@ import torch
 
 from ..configs import Phase2Cfg
 from ..envs import ProxQuadEnv
+from ..envs.observations import POLICY_INPUTS
 from ..models import AdaptationModule, BasePolicy, EnvFactorEncoder
 
 
@@ -31,8 +32,9 @@ class Phase2Trainer:
         # frozen Phase 1 networks
         ck = torch.load(cfg.phase1_checkpoint, map_location=E.dev, weights_only=False)
         p1 = ck["cfg"]
-        self.encoder = EnvFactorEncoder(E.priv_dim, p1.z_dim)
-        self.policy = BasePolicy(E.tracking_dim, E.action_dim, E.top_dim, p1.z_dim)
+        self.encoder = EnvFactorEncoder(E.priv_dim, p1.z_dim, p1.encoder)
+        self.policy = BasePolicy(dict(POLICY_INPUTS), p1.z_dim, E.action_dim, p1.policy,
+                                 E.a_hover)
         for name in ("encoder", "policy"):
             net = getattr(self, name)
             net.load_state_dict(ck[name])
@@ -40,7 +42,7 @@ class Phase2Trainer:
 
         # trainable adaptation module
         self.phi = AdaptationModule(E.bottom_hist_dim, oc.bottom_history_len, E.top_dim,
-                                    oc.top_history_len, p1.z_dim).to(E.dev)
+                                    oc.top_history_len, p1.z_dim, cfg.adaptation).to(E.dev)
         self.opt = torch.optim.Adam(self.phi.parameters(), lr=cfg.lr)
 
         self.z_hat = torch.zeros(E.n, p1.z_dim, device=E.dev)   # held between refreshes
@@ -68,12 +70,13 @@ class Phase2Trainer:
     @torch.no_grad()
     def act(self, obs: dict[str, torch.Tensor], just_reset: torch.Tensor | None = None):
         z_hat = self.estimate(just_reset)
-        return self.policy(obs["tracking_err"], obs["prev_action"], obs["top"], z_hat)
+        return self.policy.act_mean(obs, z_hat)
 
     def collect_rollout(self):
         """Run `rollout_steps` env steps with act(); store env.get_history() (clone it:
         the history is a view into a circular buffer) and target(obs) at every step (phi learns from every step, whatever its deployment
-        refresh rate)."""
+        refresh rate). Update phi's normalizers (phi.update_norm) from the stored
+        histories; pi's and mu's stay frozen at their Phase 1 values."""
         raise NotImplementedError("Phase 2 comes after Phase 1 is settled")
 
     def update(self, rollout) -> dict[str, float]:

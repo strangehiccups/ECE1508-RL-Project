@@ -60,6 +60,7 @@ PRIV_LAYOUT = [
                                 # from the per-rotor thrust ratios above.
 ]
 
+# Top drone related state and action history for adaptation module
 TOP_LAYOUT = [
     ("rel_pos", 3),             # p_top - p_bottom
     ("rel_vel", 3),
@@ -84,6 +85,14 @@ def layout_dim(layout) -> int:
     return sum(d for _, d in layout)
 
 
+# observations for the actor and critic needed
+POLICY_INPUTS = [
+    ("tracking_err", layout_dim(TRACKING_LAYOUT)),
+    ("prev_action", 4),
+    ("top", layout_dim(TOP_LAYOUT)),
+]
+
+# Pack different parts of tensors
 def pack(layout, parts: dict[str, torch.Tensor]) -> torch.Tensor:
     out = []
     for name, dim in layout:
@@ -93,7 +102,7 @@ def pack(layout, parts: dict[str, torch.Tensor]) -> torch.Tensor:
         out.append(x)
     return torch.cat(out, dim=-1)
 
-
+# Describe the name and dimensions of the layout
 def describe(layout) -> str:
     rows, i = [], 0
     for name, dim in layout:

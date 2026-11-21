@@ -1,6 +1,6 @@
 """Figure of the current downwash model, computed with the env's own model code.
 
-Run from code/:  python -m ProxQuad.scripts.plot_downwash [--rotor efficiency|bemt] [--out PATH]
+Run from code/:  python -m ProxQuad.scripts.plot_downwash [--rotor bemt|efficiency] [--out PATH]
 
 Both drones nominal X650s, level; top drone hovers at the origin at hover thrust.
 Random model parameters at the middle of their ranges; turbulence (zero-mean, random)
@@ -35,7 +35,7 @@ BLUES = ["#fcfcfb", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf",
 DZ_SET = [0.5, 1.0, 2.0]
 
 
-def effects(env, bot_pos: torch.Tensor, rotor: str = "efficiency"):
+def effects(env, bot_pos: torch.Tensor, rotor: str = AeroCfg().rotor.model):
     """Lift loss split [% weight] and tilt torque [N m] for bottom drones at bot_pos."""
     k = bot_pos.shape[0]
     model = build(k, env.dev, "rotors", rotor)
@@ -97,7 +97,7 @@ def drone(ax, x, z, label, left=False, rotor_x=0.229907, r=0.1905, plane=0.1313)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rotor", default="efficiency", choices=["efficiency", "bemt"])
+    ap.add_argument("--rotor", default=AeroCfg().rotor.model, choices=["efficiency", "bemt"])
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     suffix = "" if args.rotor == "efficiency" else f"_{args.rotor}"
