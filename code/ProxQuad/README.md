@@ -22,7 +22,8 @@ settings and the downwash over the next step. φ reads both drones' histories: t
 lets it tell "heavy" from "in the wake" and predict the downwash.
 
 **Status:** environment built and smoke-tested; networks μ, π, critic, φ implemented
-(`models/`). Training loops (`algos/`) are stubs until the RL algorithm is decided.
+(`models/`). Phase 1 PPO (`algos/phase1.py` + `algos/storage.py`) trains; pilot and
+circle runs evaluated (results log in `CLAUDE.md`). Phase 2 loop: stub.
 
 ## Layout
 
@@ -42,15 +43,18 @@ ProxQuad/
 │   ├── history.py           Phase 2 history buffers
 │   └── aero/                downwash: wake model + rotor model + drag + turbulence
 ├── models/                  μ, π (+ optional spectral norm) + critic, φ
-├── algos/                   phase1.py, phase2.py (stubs: data flow only)
+├── algos/                   phase1.py + storage.py (PPO), phase2.py (stub)
+├── eval/                    controllers, seeded rollouts, metrics, report (any phase)
 ├── utils/                   rotation math, running normalizer
-└── scripts/                 smoke_test, inspect_downwash, view_episode, train_phase1/2
+└── scripts/                 smoke_test, inspect_downwash, view_episode, train_phase1/2, evaluate
 ```
 
 Run from `code/`: `python -m ProxQuad.scripts.smoke_test`, `python -m ProxQuad.scripts.inspect_downwash`.
 Watch an episode with the downwash drawn: `python -m ProxQuad.scripts.view_episode --scenario
 hover_over` (live window), or add `--video runs/videos/hover.mp4` to record an MP4 (works
-headless over SSH). The bottom drone is flown by the geometric controller until a policy exists.
+headless over SSH). The bottom drone is flown by the geometric controller, or by a trained
+policy with `--checkpoint runs/<name>/model.pt`. Evaluate a checkpoint on all scenarios:
+`python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt`.
 
 ## Decisions
 
@@ -93,6 +97,24 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   hover speed. A bottom start inside the collision ellipsoid × `start_clearance` (1.25)
   is redrawn (fallback: start on the reference, which `dz ≥ 0.5 m` keeps clear). Before
   this, ~0.2 % of episodes started in collision and ended on their first step.
+- Circle scenarios (2026-11-21, `CircleCfg`): `circle_same` and `circle_opposite`, the
+  first moving bottom reference. Both drones circle the vertical axis through the target,
+  the bottom drone at r ∈ 1.0–2.5 m and v ∈ 0.5–1.5 m/s (≤ 2.25 m/s² centripetal, ~13° tilt);
+  the top drone dz higher on r + δr (δr ∈ ±0.4 m), with the same angular rate at an arc
+  offset of ±0.8 m (continuous or partial wake: a rotating hover_over), or the opposite
+  rate from a random phase (crossings every πr/v at a closing speed of 2v). Exact vel, acc and
+  jerk, so π gets R_ref and ω_ref. No thrust-magnitude input (horizontal circles change
+  |acc + g|/g by < 3 %), so the obs layout and the networks are unchanged. The bottom drone
+  starts level (brief transient up to the reference tilt). Off by default (the default mix
+  stays the 4 original scenarios); `train_phase1 --with-circles` uses hover_over /
+  pass_over / approach_hover_leave 0.2, far 0.1, circle_same / circle_opposite 0.15. With
+  no circle enabled, `bottom_reference` keeps the set-point path (acc = None).
+- Evaluation (2026-11-21, `eval/` + `scripts/evaluate.py`): every controller (policy,
+  geometric baseline, z ablations; Phase 2's φ policy later) flies the same seeded episodes,
+  one per env. Metrics per scenario: crashes, return, position / velocity / rate RMS,
+  tilt and yaw error, action rate, saturation, and position / tilt error binned by the
+  minimum rotor thrust ratio (wake strength, no single threshold). Tracking metrics skip
+  the first 2 s (start transient). Results log: `CLAUDE.md`.
 - Downwash: analytic model.
 - Rotor model (2026-11-20): **BEMT** (option B), not the linear efficiency law (option A,
   its linearization at hover). Same cost; BEMT gets the larger loss in a strong wake
@@ -210,6 +232,23 @@ Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCf
 - Sizes: μ 40 k, π 24 k, critic 84 k, φ 56 k parameters; μ + π + critic forward and
   sample at 4096 envs ≈ 1.8 ms.
 
+Phase 1 training (2026-11-20): **PPO**, own code (not SB3 / TorchRL / rsl_rl), written
+from `code/quad/train.py` and checked against rsl_rl's `ppo.py` (installed via mjlab).
+Synchronous on one GPU over the batched envs; distributed schemes such as Gorila (async
+DQN over many machines) do not apply: discrete actions, off-policy, built for CPU-bound
+simulators. Skeleton: `Phase1Trainer` (`algos/phase1.py`), `RolloutStorage`
+(`algos/storage.py`), `PPOCfg`.
+- Loop: warm-up rollout → normalizers; then rollout → update → normalizers → log / save.
+- μ is in the actor's graph: the rollout stores e_t, the update recomputes z = μ(e_t)
+  with gradients.
+- Time-outs: the env resets inside `step()` and does not return the last obs, so the
+  value is bootstrapped with V(s_t) (rsl_rl's approximation): r_t += γ V(s_t).
+- One Adam over all parameters, gradients clipped per network: the critic's targets are
+  ~100 at γ = 0.996 (0.4 per step in hover), so its gradients would dominate a shared norm.
+- Defaults from rsl_rl (5 epochs × 4 minibatches, clip 0.2, lr 1e-3 adaptive on
+  KL = 0.01, entropy 0.005, clipped value loss); γ = 0.99^0.4, λ = 0.95^0.4 for 250 Hz.
+- Sanity run first: `train_phase1 --sanity` (aero off, top drone always far: plain hover).
+
 Planned (not yet): **residual mode** (2026-11-20, deferred by the user). `ActionCfg.mode`
 = "direct" | "residual". Residual: a geometric controller on the bottom drone with
 nominal parameters (own `ControllerCfg`, ki = 0 so it holds no state π cannot see) gives
@@ -224,7 +263,8 @@ a_base,t at s_t; π outputs d_t and the env applies a_t = clip(a_base,t + s·d_t
 - Evaluation baseline: the controller alone (d = 0).
 
 Planned (not yet): **bottom trajectory tracking**. The flat-reference plumbing is in
-place; `Scenarios.bottom_reference(t)` returns hover. Before trajectories train:
+place; `Scenarios.bottom_reference(t)` returns hover, or the horizontal circles of the
+circle scenarios (which need none of the items below). Before general trajectories train:
 - Bottom path kinds in `Scenarios`. Top paths are absolute (placed around the fixed
   target); once the bottom drone moves, encounters must be placed on its path (e.g. a
   sampled crossing time), or the wake will mostly miss it.
@@ -265,8 +305,7 @@ Open (tagged `[CONFIRM]` in `configs/default.py`):
 6. Downwash calibration (below), reward weights.
 7. Spectral norm on π (off; ablation) and its bound K = 10; the critic's inputs
    (asymmetric, raw e_t).
-8. RL algorithm. π's state-independent σ assumes PPO / TRPO; SAC would need a tanh-squashed
-   Gaussian with a state-dependent log σ head.
+8. PPO hyperparameters (`PPOCfg`): rsl_rl defaults, to tune once training runs.
 
 ## X650 model (from dev_CCM)
 

@@ -60,16 +60,13 @@ PRIV_LAYOUT = [
                                 # from the per-rotor thrust ratios above.
 ]
 
-# Top drone related state and action history for adaptation module
+# Top drone related state and action history for adaptation module and actor-critic
 TOP_LAYOUT = [
     ("rel_pos", 3),             # p_top - p_bottom
     ("rel_vel", 3),
     ("rotmat", 9),              # top body -> world
     ("ang_vel", 3),             # top body frame
-    ("prev_action", 4),         # top rotor command applied over the last step, in the
-                                # bottom action's units (2u - 1); the previous one, like
-                                # a_{t-1}, since the current command may not reach the
-                                # bottom drone in time on hardware
+    ("prev_action", 4),         # top rotor command applied over the last step
 ]
 
 

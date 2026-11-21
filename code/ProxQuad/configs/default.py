@@ -127,9 +127,21 @@ class TopPathCfg:
 
 
 @dataclass
+class CircleCfg:
+    """circle_same / circle_opposite: both drones circle the vertical axis through the
+    bottom target, the top drone dz (TopPathCfg.dz) higher. Same angular rate (same
+    direction) or opposite rate (crossings every pi r / v). [CONFIRM all ranges]"""
+    radius: Range = (1.0, 2.5)           # bottom drone's circle [m]
+    speed: Range = (0.5, 1.5)            # bottom drone's speed [m/s]; centripetal <= 2.25 m/s^2
+    radius_offset: Range = (-0.4, 0.4)   # top radius - bottom radius [m]
+    arc_offset: Range = (-0.8, 0.8)      # circle_same: top drone's lead along the circle [m]
+
+
+@dataclass
 class ScenarioCfg:
     bottom: BottomPathCfg = field(default_factory=BottomPathCfg)
     top: TopPathCfg = field(default_factory=TopPathCfg)
+    circle: CircleCfg = field(default_factory=CircleCfg)
     start_clearance: float = 1.25        # start outside the collision ellipsoid x this [CONFIRM]
 
 
@@ -318,18 +330,37 @@ class AdaptationCfg:
 # Training (algorithm details are still open)
 # ---------------------------------------------------------------------------
 @dataclass
+class PPOCfg:
+    """rsl_rl PPO defaults; gamma / lam keep their horizon in seconds at 250 Hz
+    (x_250Hz = x_100Hz ** 0.4)."""
+    gamma: float = 0.996          # 0.99 ** 0.4
+    lam: float = 0.98             # 0.95 ** 0.4
+    clip: float = 0.2
+    epochs: int = 5
+    minibatches: int = 4          # 4096 envs x 60 steps / 4 = 61 440 samples each
+    lr: float = 1e-3
+    schedule: str = "adaptive"    # "adaptive": lr follows the KL | "fixed"
+    desired_kl: float = 0.01
+    lr_bounds: Range = (1e-5, 1e-2)
+    entropy_coef: float = 0.005
+    value_coef: float = 1.0
+    clip_value_loss: bool = True
+    max_grad_norm: float = 1.0    # per network (actor incl. mu, critic)
+    warmup_rollouts: int = 1      # feed the normalizers before the first update
+
+
+@dataclass
 class Phase1Cfg:
-    """Phase 1: jointly train env-factor encoder mu and base policy pi with RL."""
+    """Phase 1: jointly train env-factor encoder mu and base policy pi with PPO."""
     env: EnvCfg = field(default_factory=EnvCfg)
-    algorithm: str = "TBD"        # PPO / TRPO / ... (to be decided)
     z_dim: int = 8                # mu(e_t: 24 dims) -> z_t (RMA uses 8)
     policy: PolicyCfg = field(default_factory=PolicyCfg)
     critic: CriticCfg = field(default_factory=CriticCfg)
     encoder: EncoderCfg = field(default_factory=EncoderCfg)
+    ppo: PPOCfg = field(default_factory=PPOCfg)
     iterations: int = 1000
     rollout_steps: int = 60       # 0.24 s at 250 Hz (24 steps at 100 Hz before)
-    # discount: keep the horizon in seconds when the control rate changes,
-    # gamma_250Hz = gamma_100Hz ** 0.4 (0.99 -> 0.996); same for GAE lambda
+    save_interval: int = 50       # iterations
     seed: int = 0
     log_dir: str = "runs/phase1"
     checkpoint: str = "runs/phase1/model.pt"

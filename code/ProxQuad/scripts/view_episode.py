@@ -1,8 +1,9 @@
 """Watch one ProxQuad episode in the MuJoCo viewer, or record it to MP4.
 
 The env runs on the GPU as usual (one env); its state is mirrored into a CPU MjData for
-drawing. The bottom drone is flown by the geometric controller until a trained policy
-exists. Downwash drawing (from the env's wake model):
+drawing. The bottom drone is flown by the geometric controller, or by a trained Phase 1
+policy with --checkpoint (deterministic, z = mu(e_t)). Downwash drawing (from the env's
+wake model):
     field     arrows in the vertical plane through the top drone, facing the camera:
               wake velocity, length and brightness by speed
     inflow    cyan arrows: axial inflow through each bottom rotor; blue arrow: wake
@@ -12,6 +13,7 @@ exists. Downwash drawing (from the env's wake model):
 Run from code/:
     python -m ProxQuad.scripts.view_episode --scenario hover_over
     python -m ProxQuad.scripts.view_episode --video runs/videos/pass.mp4 --scenario pass_over
+    python -m ProxQuad.scripts.view_episode --checkpoint runs/phase1_pilot/model.pt
 """
 
 import argparse
@@ -28,9 +30,9 @@ import torch
 
 from ..configs import EnvCfg, SimCfg
 from ..envs import ProxQuadEnv
-from ..envs.controller import GeometricController
 from ..envs.prox_quad_env import ASSETS
 from ..envs.scenarios import SCENARIOS
+from ..eval import GeometricBaseline, Phase1Policy, load_phase1
 
 FIELD_RGB = np.array([0.25, 0.6, 1.0])
 CYAN = np.array([0.0, 0.9, 1.0, 0.95])
@@ -48,6 +50,7 @@ def parse_args():
     p.add_argument("--size", type=int, nargs=2, default=(1280, 720), metavar=("W", "H"))
     p.add_argument("--distance", type=float, default=6.0, help="camera distance [m]")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--checkpoint", help="Phase 1 model.pt; default: geometric controller")
     return p.parse_args()
 
 
@@ -114,15 +117,18 @@ def make_env(args):
     cfg.scenario.top.scenario_probs = {args.scenario: 1.0}
     cfg.aero.enabled = not args.no_downwash
     env = ProxQuadEnv(cfg)
-    ctrl = GeometricController(cfg.top_controller, env.bottom, env.dt, env.n, env.dev)
+    if args.checkpoint:
+        ctrl = Phase1Policy(*load_phase1(args.checkpoint, env))
+    else:
+        ctrl = GeometricBaseline(env)
     return env, ctrl
 
 
 def advance(env, ctrl, steps: int) -> None:
     for _ in range(steps):
-        ref = env.scenario.bottom_reference(env.steps.float() * env.dt)
-        _, _, done, info = env.step(env.omega_to_action(ctrl(env._bot_state, ref)))
+        _, _, done, info = env.step(ctrl.act(env, env.get_obs()))
         if bool(done[0]):
+            ctrl.reset()
             why = [k for k, x in info["crash_reasons"].items() if bool(x[0])]
             print("episode end:", ", ".join(why) or "time-out", "-> new episode")
 
@@ -203,7 +209,8 @@ def main() -> None:
     m = mujoco.MjModel.from_xml_path(str(ASSETS / env.cfg.sim.xml))
     d = mujoco.MjData(m)
     drawer = DownwashDrawer(env, m)
-    print(f"scenario {args.scenario}, downwash {'off' if args.no_downwash else 'on'}")
+    print(f"scenario {args.scenario}, downwash {'off' if args.no_downwash else 'on'}, "
+          f"bottom drone: {args.checkpoint or ctrl.name}")
     (run_video if args.video else run_live)(args, env, ctrl, m, d, drawer)
 
 

@@ -12,3 +12,4 @@ Scenarios to train can be further considered
 The two adaptation modules can be run on separate machines?
 
 
+Compare with RMA structure of other group mates' branches, see the difference

@@ -41,7 +41,7 @@ class BasePolicy(nn.Module):
                 self.net[-1].weight.mul_(cfg.init_out_gain)
                 self.net[-1].bias.zero_()
         
-        # Setup the std of action distribution as a single neuron parameter
+        # Setup the log of std of each action distribution
         self.log_std = nn.Parameter(torch.full((action_dim,), math.log(cfg.init_std)))
         self.log_std_bounds = cfg.log_std_bounds
         self.register_buffer("a_hover", torch.tensor(float(a_hover)))
@@ -55,7 +55,7 @@ class BasePolicy(nn.Module):
 
     def forward(self, obs: dict[str, torch.Tensor], z: torch.Tensor) -> Independent:
         """obs: env obs dict, z (B, z_dim) -> distribution; log_prob / entropy are (B,)."""
-        # Draws action based on the normal distribution (mean, std^2)
+        # Returns the normal distribution (mean, std^2) of the action
         mean = self.act_mean(obs, z)
         std = self.log_std.clamp(*self.log_std_bounds).exp().expand_as(mean)
         return Independent(Normal(mean, std), 1)
