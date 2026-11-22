@@ -162,11 +162,23 @@ class Figure8Cfg:
 
 
 @dataclass
+class ShuttleCfg:
+    """shuttle_under: the top drone holds dz (TopPathCfg.dz) above a horizontal line through
+    the target; the bottom drone shuttles along it, x = a sin(th0 + w t), w = speed / a,
+    passing under the top drone at its peak speed. Peak acc = speed^2 / a."""
+    amplitude: Range = (1.5, 2.5)        # a [m]
+    speed: Range = (1.0, 2.0)            # peak speed, at the line's centre [m/s]
+    along_offset: Range = (-0.3, 0.3)    # top hold point along the line, from its centre [m]
+    cross_offset: Range = (0.0, 0.4)     # top hold point across the line [m]
+
+
+@dataclass
 class ScenarioCfg:
     bottom: BottomPathCfg = field(default_factory=BottomPathCfg)
     top: TopPathCfg = field(default_factory=TopPathCfg)
     circle: CircleCfg = field(default_factory=CircleCfg)
     figure8: Figure8Cfg = field(default_factory=Figure8Cfg)
+    shuttle: ShuttleCfg = field(default_factory=ShuttleCfg)
     start_clearance: float = 1.25        # start outside the collision ellipsoid x this [CONFIRM]
 
 

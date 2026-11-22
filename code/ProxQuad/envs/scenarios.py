@@ -1,6 +1,6 @@
 """Per-episode scenarios: reference paths and start states of both drones, batched over envs.
 
-Bottom drone: hover at `target`, except in the circle and figure-8 scenarios.
+Bottom drone: hover at `target`, except in the circle, figure-8 and shuttle scenarios.
 
 Top drone: start point A, hold point B, end point C,
     t < t0          hold at A
@@ -24,7 +24,12 @@ Figure-8 scenarios (ScenarioCfg.figure8): the same, on a lemniscate of Gerono ce
 the target with a random heading (half-width a, lobes along the heading):
     figure8_same          same parameter rate, the top drone at a phase lead
     figure8_opposite      opposite parameter rate (path flown backwards), random phase
-When no circle or figure-8 scenario is enabled, bottom_reference stays the plain
+
+Shuttle scenario (ScenarioCfg.shuttle): the top drone holds dz above a horizontal line
+through the target (+ sway); the bottom drone flies back and forth along it,
+a sin(th0 + w t), passing under the top drone at its peak speed:
+    shuttle_under
+When no circle, figure-8 or shuttle scenario is enabled, bottom_reference stays the plain
 set-point (acc, jerk = None), so the env keeps its set-point error path.
 """
 
@@ -37,9 +42,11 @@ from ..utils.math import uniform
 from .controller import FlatRef
 
 SCENARIOS = ("hover_over", "pass_over", "approach_hover_leave", "far",
-             "circle_same", "circle_opposite", "figure8_same", "figure8_opposite")
+             "circle_same", "circle_opposite", "figure8_same", "figure8_opposite",
+             "shuttle_under")
 CIRCLES = ("circle_same", "circle_opposite")
 EIGHTS = ("figure8_same", "figure8_opposite")
+SHUTTLES = ("shuttle_under",)
 NEVER = 1e6  # "t = infinity" that stays finite in arithmetic
 
 
@@ -71,6 +78,16 @@ def figure8(t, a, w, th0, psi, center, z):
     return pos, vel, acc, jerk
 
 
+def shuttle(t, a, w, th0, psi, center):
+    """Horizontal back and forth along heading psi through center: a sin(th0 + w t)
+    -> pos, vel, acc, jerk (N, 3)."""
+    th = th0 + w * t
+    s, c = th.sin(), th.cos()
+    u = torch.stack([psi.cos(), psi.sin(), torch.zeros_like(psi)], dim=-1)
+    k = lambda x: x[:, None] * u  # noqa: E731
+    return center + k(a * s), k(a * w * c), k(-a * w**2 * s), k(-a * w**3 * c)
+
+
 class Scenarios:
     def __init__(self, cfg: ScenarioCfg, collision_radii: tuple[float, float], num_envs: int,
                  device: torch.device):
@@ -90,9 +107,11 @@ class Scenarios:
         self.sway_dir, self.sway_amp, self.sway_w, self.sway_phase = z3(), z1(), z1(), z1()
         # circles / figure-8s: radius or half-width, signed rate, start phase, heading (8 only);
         # bottom (b) and top (t)
-        self.paths_on = any(cfg.top.scenario_probs.get(k, 0.0) > 0 for k in CIRCLES + EIGHTS)
+        self.paths_on = any(cfg.top.scenario_probs.get(k, 0.0) > 0
+                            for k in CIRCLES + EIGHTS + SHUTTLES)
         self.is_circle = torch.zeros(num_envs, dtype=torch.bool, device=device)
         self.is_eight = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self.is_shuttle = torch.zeros(num_envs, dtype=torch.bool, device=device)
         self.r_b, self.w_b, self.th_b, self.psi = z1(), z1(), z1(), z1()
         self.r_t, self.w_t, self.th_t, self.z_t = z1(), z1(), z1(), z1()
 
@@ -119,6 +138,14 @@ class Scenarios:
         moving = is_("pass_over") | is_("approach_hover_leave")
         # far: hold point moved laterally away from the target
         B = torch.where(is_("far")[:, None], self.target + cfg.far_distance * u_off + up, B)
+        # shuttle_under: hold point over the bottom drone's line (heading psi)
+        sh, is_sh = self.cfg.shuttle, is_("shuttle_under")
+        psi = 2 * math.pi * torch.rand(k, device=dev)
+        u_s = torch.stack([psi.cos(), psi.sin(), torch.zeros_like(psi)], dim=-1)
+        n_s = torch.stack([-psi.sin(), psi.cos(), torch.zeros_like(psi)], dim=-1)
+        B_s = (self.target + uniform(sh.along_offset, k, dev)[:, None] * u_s
+               + uniform(sh.cross_offset, k, dev)[:, None] * n_s + up)
+        B = torch.where(is_sh[:, None], B_s, B)
         # pass_over leaves along the approach direction; approach_hover_leave on a new one
         u_out = torch.where(is_("pass_over")[:, None], u_in, u_out)
         A = torch.where(moving[:, None], B - D * u_in, B)
@@ -150,30 +177,38 @@ class Scenarios:
         lead = th_b + sign * pick(e.arc_offset, c.arc_offset) / r_b
         self.is_circle[ids] = is_("circle_same") | is_("circle_opposite")
         self.is_eight[ids] = eight
+        self.is_shuttle[ids] = is_sh
+        amp = uniform(sh.amplitude, k, dev)
+        r_b = torch.where(is_sh, amp, r_b)
+        w_b = torch.where(is_sh, uniform(sh.speed, k, dev) / amp, w_b)
         self.r_b[ids], self.w_b[ids], self.th_b[ids] = r_b, w_b, th_b
-        self.psi[ids] = 2 * math.pi * torch.rand(k, device=dev)
+        self.psi[ids] = psi
         self.r_t[ids] = r_b + pick(e.size_offset, c.radius_offset)
         self.w_t[ids] = torch.where(same, w_b, -w_b)
         self.th_t[ids] = torch.where(same, lead, 2 * math.pi * torch.rand(k, device=dev))
         self.z_t[ids] = self.target[2] + dz
 
-    def _paths(self, t, r, w, th, z, hold):
-        """hold = (pos, vel, acc, jerk), replaced by the circle / figure-8 where enabled."""
-        for mask, path in ((self.is_circle, circle(t, r, w, th, self.target, z)),
-                           (self.is_eight, figure8(t, r, w, th, self.psi, self.target, z))):
+    def _paths(self, t, r, w, th, z, hold, bottom: bool = False):
+        """hold = (pos, vel, acc, jerk), replaced by the circle / figure-8 (and for the
+        bottom drone the shuttle) where enabled."""
+        paths = [(self.is_circle, circle(t, r, w, th, self.target, z)),
+                 (self.is_eight, figure8(t, r, w, th, self.psi, self.target, z))]
+        if bottom:
+            paths.append((self.is_shuttle, shuttle(t, r, w, th, self.psi, self.target)))
+        for mask, path in paths:
             m = mask[:, None]
             hold = tuple(torch.where(m, p, h) for p, h in zip(path, hold))
         return hold
 
     def bottom_reference(self, t: torch.Tensor) -> FlatRef:
-        """Hover at the target (acc, jerk, yaw = None) unless a circle / figure-8 scenario
-        is enabled; then pos, vel, acc, jerk for all envs, the path where it applies."""
+        """Hover at the target (acc, jerk, yaw = None) unless a circle / figure-8 / shuttle
+        scenario is enabled; then pos, vel, acc, jerk for all envs, the path where it applies."""
         pos = self.target.expand(self.n, 3)
         if not self.paths_on:
             return FlatRef(pos=pos, vel=torch.zeros_like(pos))
         zero = torch.zeros_like(pos)
         p, v, a, j = self._paths(t, self.r_b, self.w_b, self.th_b, self.target[2],
-                                 (pos, zero, zero, zero))
+                                 (pos, zero, zero, zero), bottom=True)
         return FlatRef(pos=p, vel=v, acc=a, jerk=j)
 
     def top_reference(self, t: torch.Tensor) -> FlatRef:

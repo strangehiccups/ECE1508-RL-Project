@@ -4,6 +4,7 @@ extras() -> per-step (N,) signals the rollout records next to its own."""
 
 import torch
 
+from ..configs import RobustControllerCfg
 from ..envs import ProxQuadEnv
 from ..envs.controller import GeometricController, RobustGeometricController
 from ..envs.observations import POLICY_INPUTS
@@ -44,12 +45,13 @@ class GeometricBaseline(Controller):
 class RobustGeometricBaseline(GeometricBaseline):
     """Geometric controller + UDE (env.cfg.robust_controller): estimates the lumped
     disturbance force and torque from its own state and commands and compensates them.
-    The non-learned counterpart of phi."""
+    The non-learned counterpart of phi. cfg: default env.cfg.robust_controller."""
 
-    def __init__(self, env: ProxQuadEnv, name: str = "geometric+UDE"):
+    def __init__(self, env: ProxQuadEnv, name: str = "geometric+UDE",
+                 cfg: RobustControllerCfg | None = None):
         self.name = name
-        self.ctrl = RobustGeometricController(env.cfg.robust_controller, env.bottom, env.dt,
-                                              env.n, env.dev)
+        self.ctrl = RobustGeometricController(cfg or env.cfg.robust_controller, env.bottom,
+                                              env.dt, env.n, env.dev)
         self.n, self.dev = env.n, env.dev
 
 
