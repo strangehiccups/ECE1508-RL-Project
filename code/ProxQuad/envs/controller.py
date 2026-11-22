@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
-from ..configs import ControllerCfg
+from ..configs import ControllerCfg, RobustControllerCfg
 from ..utils.math import normalize_with_rate, vee
 from .drone import DroneParams, DroneState
 
@@ -40,9 +40,11 @@ class GeometricController:
     def reset(self, ids: torch.Tensor) -> None:
         self.integral[ids] = 0.0
 
-    def __call__(self, s: DroneState, ref: FlatRef) -> torch.Tensor:
+    def __call__(self, s: DroneState, ref: FlatRef, d_force: torch.Tensor | None = None,
+                 d_torque: torch.Tensor | None = None) -> torch.Tensor:
         """Returns rotor speed commands (N, 4) [rad/s]. Call once per control step
-        (advances the integrator)."""
+        (advances the integrator). d_force (N, 3, inertial) / d_torque (N, 3, body):
+        estimated disturbances, subtracted from the commanded force / torque."""
         p = self.p
         # ---- position loop -> desired force (inertial frame)
         e_p, e_v = ref.pos - s.pos, ref.vel - s.vel
@@ -51,6 +53,8 @@ class GeometricController:
         if ref.acc is not None:
             acc = acc + ref.acc
         F_raw = p.mass_nom * (acc + p.g * self.e3)
+        if d_force is not None:
+            F_raw = F_raw - d_force
         Fz_min = 0.2 * p.weight_nom
         Fz = F_raw[:, 2].clamp(min=Fz_min)                         # keep pushing up
         Fxy = F_raw[:, :2]
@@ -77,6 +81,8 @@ class GeometricController:
         Jw = w @ self.J.T                                          # (N, 3) = J w per env
         tau = (-self.k_R * e_R - self.k_omega * e_w + torch.cross(w, Jw, dim=-1)
                - torch.cross(w, w_d_body, dim=-1) @ self.J.T)
+        if d_torque is not None:
+            tau = tau - d_torque
 
         # ---- control allocation: [F, tau] -> w^2 -> clip -> w
         w_sq = (torch.cat([T[:, None], tau], dim=-1) @ p.alloc_pinv.T).clamp(min=0.0)
@@ -113,6 +119,52 @@ class GeometricController:
         W = R_d.transpose(1, 2) @ R_d_dot                          # skew-symmetric
         w_d = vee(0.5 * (W - W.transpose(1, 2)))                   # symmetrize round-off
         return R_d, w_d
+
+
+class RobustGeometricController(GeometricController):
+    """Geometric controller + UDE. d_hat = G_f[residual], G_f = 1 / (T s + 1), residual =
+    p_dot - u (p: momentum m v inertial / J w body; u: nominal applied force T R e3 - m g e3
+    / torque tau - w x J w). Without differentiating the state:
+        d_hat = (p - xi) / T,   xi_dot = (p + T u - xi) / T
+    u comes from the commanded rotor speeds (after allocation and clipping) through the
+    nominal allocation, so motor, mass, inertia, CoM, drag, gust and wake errors all land
+    in d_hat. Nominal parameters only."""
+
+    def __init__(self, cfg: RobustControllerCfg, params: DroneParams, dt: float, num_envs: int,
+                 device: torch.device):
+        super().__init__(cfg, params, dt, num_envs, device)
+        self.T_F, self.T_T = cfg.ude_tau_force, cfg.ude_tau_torque
+        self.a_F, self.a_T = math.exp(-dt / self.T_F), math.exp(-dt / self.T_T)
+        self.lim_F = cfg.ude_force_limit * params.weight_nom
+        self.lim_T = cfg.ude_torque_limit
+        z = lambda: torch.zeros(num_envs, 3, device=device)  # noqa: E731
+        self.xi_F, self.xi_T = z(), z()       # filter states
+        self.in_F, self.in_T = z(), z()       # p + T u of the last step
+        self.d_F, self.d_T = z(), z()         # estimates (inertial force, body torque)
+        self.fresh = torch.ones(num_envs, dtype=torch.bool, device=device)
+
+    def reset(self, ids: torch.Tensor) -> None:
+        super().reset(ids)
+        self.fresh[ids] = True
+
+    def __call__(self, s: DroneState, ref: FlatRef) -> torch.Tensor:
+        p_F = self.p.mass_nom * s.vel
+        p_T = s.omega @ self.J.T
+        new = self.fresh[:, None]             # first step of an episode: d_hat = 0
+        self.xi_F = torch.where(new, p_F, self.a_F * self.xi_F + (1 - self.a_F) * self.in_F)
+        self.xi_T = torch.where(new, p_T, self.a_T * self.xi_T + (1 - self.a_T) * self.in_T)
+        self.fresh[:] = False
+        self.d_F = ((p_F - self.xi_F) / self.T_F).clamp(-self.lim_F, self.lim_F)
+        self.d_T = ((p_T - self.xi_T) / self.T_T).clamp(-self.lim_T, self.lim_T)
+
+        omega_cmd = super().__call__(s, ref, self.d_F, self.d_T)
+
+        wrench = omega_cmd.pow(2) @ self.p.alloc.T                  # nominal [T, tau]
+        u_F = wrench[:, :1] * s.R[:, :, 2] - self.p.weight_nom * self.e3
+        u_T = wrench[:, 1:] - torch.cross(s.omega, p_T, dim=-1)
+        self.in_F = p_F + self.T_F * u_F
+        self.in_T = p_T + self.T_T * u_T
+        return omega_cmd
 
 
 def flat_attitude(ref: FlatRef, g: float) -> tuple[torch.Tensor, torch.Tensor]:

@@ -5,9 +5,9 @@ extras() -> per-step (N,) signals the rollout records next to its own."""
 import torch
 
 from ..envs import ProxQuadEnv
-from ..envs.controller import GeometricController
+from ..envs.controller import GeometricController, RobustGeometricController
 from ..envs.observations import POLICY_INPUTS
-from ..models import BasePolicy, EnvFactorEncoder
+from ..models import AdaptationModule, BasePolicy, EnvFactorEncoder
 
 
 class Controller:
@@ -39,6 +39,18 @@ class GeometricBaseline(Controller):
     def act(self, env, obs):
         ref = env.scenario.bottom_reference(env.steps.float() * env.dt)
         return env.omega_to_action(self.ctrl(env._bot_state, ref))
+
+
+class RobustGeometricBaseline(GeometricBaseline):
+    """Geometric controller + UDE (env.cfg.robust_controller): estimates the lumped
+    disturbance force and torque from its own state and commands and compensates them.
+    The non-learned counterpart of phi."""
+
+    def __init__(self, env: ProxQuadEnv, name: str = "geometric+UDE"):
+        self.name = name
+        self.ctrl = RobustGeometricController(env.cfg.robust_controller, env.bottom, env.dt,
+                                              env.n, env.dev)
+        self.n, self.dev = env.n, env.dev
 
 
 class Phase1Policy(Controller):
@@ -73,22 +85,64 @@ class Phase1Policy(Controller):
 
 
 class Phase2Policy(Controller):
-    """pi with z_hat = phi(bottom history, top history) from env.get_history(). extras():
-    |z_hat - mu(e_t)| per step, the adaptation error (how fast z_hat follows z when the
-    wake arrives). To implement once Phase 2 training exists."""
+    """pi with z_hat = phi(bottom history, top history) at their own rates: pi acts every
+    step (act_mean); phi refreshes z_hat every `decimation` steps and at the first step of
+    an episode, pi holds it in between. extras(): z_mse = ||z_hat - mu(e_t)||^2 per step
+    (mu only measures the error, it does not act)."""
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("Phase 2 evaluation: implement with Phase 2 training")
+    def __init__(self, encoder: EnvFactorEncoder, policy: BasePolicy, phi: AdaptationModule,
+                 decimation: int, name: str = "policy"):
+        self.encoder, self.policy, self.phi = encoder, policy, phi
+        self.decimation, self.name = decimation, name
+        self.k, self.z_hat, self.z_mse = 0, None, None
+
+    def reset(self, ids=None):
+        if ids is None:
+            self.k, self.z_hat = 0, None
+
+    @torch.no_grad()
+    def act(self, env, obs):
+        h = env.get_history()
+        if self.z_hat is None or self.k % self.decimation == 0:
+            self.z_hat = self.phi(h["bottom"], h["top"])
+        else:
+            new = env.steps == 0                      # episode just (auto-)reset
+            if new.any():
+                self.z_hat[new] = self.phi(h["bottom"][new], h["top"][new])
+        self.k += 1
+        self.z_mse = (self.z_hat - self.encoder(obs["priv"])).pow(2).sum(-1)
+        return self.policy.act_mean(obs, self.z_hat)
+
+    def extras(self):
+        return {"z_mse": self.z_mse}
+
+
+def _mu_pi(ck: dict, p1, env: ProxQuadEnv) -> tuple[EnvFactorEncoder, BasePolicy]:
+    encoder = EnvFactorEncoder(env.priv_dim, p1.z_dim, p1.encoder).to(env.dev)
+    policy = BasePolicy(dict(POLICY_INPUTS), p1.z_dim, env.action_dim, p1.policy,
+                        env.a_hover).to(env.dev)
+    encoder.load_state_dict(ck["encoder"])
+    policy.load_state_dict(ck["policy"])
+    return encoder.eval(), policy.eval()
 
 
 def load_phase1(path: str, env: ProxQuadEnv) -> tuple[EnvFactorEncoder, BasePolicy]:
     """mu and pi from a Phase 1 checkpoint, built with the checkpoint's network configs
     and the env's dimensions; eval mode (normalizers frozen)."""
     ck = torch.load(path, map_location=env.dev, weights_only=False)
-    cfg = ck["cfg"]
-    encoder = EnvFactorEncoder(env.priv_dim, cfg.z_dim, cfg.encoder).to(env.dev)
-    policy = BasePolicy(dict(POLICY_INPUTS), cfg.z_dim, env.action_dim, cfg.policy,
-                        env.a_hover).to(env.dev)
-    encoder.load_state_dict(ck["encoder"])
-    policy.load_state_dict(ck["policy"])
-    return encoder.eval(), policy.eval()
+    return _mu_pi(ck, ck["cfg"], env)
+
+
+def load_phase2(path: str, env: ProxQuadEnv):
+    """(mu, pi, phi, decimation) from a Phase 2 checkpoint. The env needs the history
+    lengths phi was trained with (Phase2Cfg.env.obs)."""
+    ck = torch.load(path, map_location=env.dev, weights_only=False)
+    cfg, p1 = ck["cfg"], ck["phase1_cfg"]
+    Lb, Lt = cfg.env.obs.bottom_history_len, cfg.env.obs.top_history_len
+    assert (env.cfg.obs.bottom_history_len, env.cfg.obs.top_history_len) == (Lb, Lt), \
+        f"env histories must be ({Lb}, {Lt}) steps"
+    encoder, policy = _mu_pi(ck, p1, env)
+    phi = AdaptationModule(env.bottom_hist_dim, Lb, env.top_dim, Lt, p1.z_dim,
+                           cfg.adaptation).to(env.dev)
+    phi.load_state_dict(ck["phi"])
+    return encoder, policy, phi.eval(), cfg.adaptation_decimation

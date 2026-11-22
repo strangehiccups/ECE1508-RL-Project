@@ -1,8 +1,9 @@
 """Watch one ProxQuad episode in the MuJoCo viewer, or record it to MP4.
 
 The env runs on the GPU as usual (one env); its state is mirrored into a CPU MjData for
-drawing. The bottom drone is flown by the geometric controller, or by a trained Phase 1
-policy with --checkpoint (deterministic, z = mu(e_t)). Downwash drawing (from the env's
+drawing. The bottom drone is flown by the geometric controller, or with --checkpoint by a
+trained Phase 1 policy (deterministic, z = mu(e_t)) or a Phase 2 checkpoint (pi on z_hat
+from phi, at their own rates), or with --ude by the geometric+UDE baseline. Downwash drawing (from the env's
 wake model):
     field     arrows in the vertical plane through the top drone, facing the camera:
               wake velocity, length and brightness by speed
@@ -32,7 +33,8 @@ from ..configs import EnvCfg, SimCfg
 from ..envs import ProxQuadEnv
 from ..envs.prox_quad_env import ASSETS
 from ..envs.scenarios import SCENARIOS
-from ..eval import GeometricBaseline, Phase1Policy, load_phase1
+from ..eval import (GeometricBaseline, Phase1Policy, Phase2Policy, RobustGeometricBaseline,
+                    load_phase1, load_phase2)
 
 FIELD_RGB = np.array([0.25, 0.6, 1.0])
 CYAN = np.array([0.0, 0.9, 1.0, 0.95])
@@ -50,7 +52,8 @@ def parse_args():
     p.add_argument("--size", type=int, nargs=2, default=(1280, 720), metavar=("W", "H"))
     p.add_argument("--distance", type=float, default=6.0, help="camera distance [m]")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--checkpoint", help="Phase 1 model.pt; default: geometric controller")
+    p.add_argument("--checkpoint", help="Phase 1 or 2 model.pt; default: geometric controller")
+    p.add_argument("--ude", action="store_true", help="without --checkpoint: geometric+UDE baseline")
     return p.parse_args()
 
 
@@ -116,9 +119,17 @@ def make_env(args):
     cfg = EnvCfg(sim=SimCfg(num_envs=1, stagger_first_episode=False))
     cfg.scenario.top.scenario_probs = {args.scenario: 1.0}
     cfg.aero.enabled = not args.no_downwash
+    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False) if args.checkpoint else {}
+    if "phi" in ck:       # Phase 2: phi needs its history lengths
+        o = ck["cfg"].env.obs
+        cfg.obs.bottom_history_len, cfg.obs.top_history_len = o.bottom_history_len, o.top_history_len
     env = ProxQuadEnv(cfg)
-    if args.checkpoint:
+    if "phi" in ck:
+        ctrl = Phase2Policy(*load_phase2(args.checkpoint, env))
+    elif args.checkpoint:
         ctrl = Phase1Policy(*load_phase1(args.checkpoint, env))
+    elif args.ude:
+        ctrl = RobustGeometricBaseline(env)
     else:
         ctrl = GeometricBaseline(env)
     return env, ctrl

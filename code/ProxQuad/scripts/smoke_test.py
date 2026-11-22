@@ -33,7 +33,7 @@ def run(num_envs: int, seconds: float, aero: bool, history: int) -> dict:
     z = lambda: torch.zeros(S, device=dev)  # noqa: E731
     err_sum, top_err_sum, cnt, crashes, episodes, sag_sum = z(), z(), z(), z(), z(), z()
     min_ratio = torch.ones(S, device=dev)
-    sag = torch.zeros(env.n, device=dev)       # worst altitude drop below target, per env
+    sag = torch.zeros(env.n, device=dev)       # worst altitude drop below the reference, per env
     reasons_total: dict[str, int] = {}
     env.timing = {k: 0.0 for k in env.timing}
 
@@ -49,9 +49,10 @@ def run(num_envs: int, seconds: float, aero: bool, history: int) -> dict:
         if done.any():
             ctrl.reset(done.nonzero().squeeze(-1))
         pos = env.qpos[:, 0:3]
-        err = (pos - env.scenario.target).norm(dim=-1)
+        ref = env.scenario.bottom_reference(env.steps.float() * env.dt).pos   # after the step
+        err = (pos - ref).norm(dim=-1)
         settled = env.steps > round(2.0 / env.dt)
-        sag = torch.maximum(sag, env.scenario.target[2] - pos[:, 2])
+        sag = torch.where(done, sag, torch.maximum(sag, ref[:, 2] - pos[:, 2]))  # done: already reset
         err_sum.index_add_(0, kind, err * settled)
         top_err_sum.index_add_(0, kind, top_err * settled)
         cnt.index_add_(0, kind, settled.float())

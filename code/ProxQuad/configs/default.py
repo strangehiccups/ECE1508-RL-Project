@@ -94,6 +94,19 @@ class ControllerCfg:
     max_tilt_deg: float = 30.0
 
 
+@dataclass
+class RobustControllerCfg(ControllerCfg):
+    """Bottom-drone baseline: geometric controller + UDE (uncertainty and disturbance
+    estimator). The UDE low-pass filters the nominal model's residual into a lumped
+    force (inertial frame) and torque (body frame) estimate, subtracted from the commanded
+    force and torque. Own state and commands only, like phi. ki_pos stays 0. Filter time
+    constants confirmed 2026-11-22."""
+    ude_tau_force: float = 0.1      # s, low-pass time constant of the force estimate
+    ude_tau_torque: float = 0.05    # s, of the torque estimate
+    ude_force_limit: float = 0.5    # |d_F| per axis, fraction of nominal weight
+    ude_torque_limit: float = 2.0   # |d_tau| per axis [N m]
+
+
 # ---------------------------------------------------------------------------
 # Scenarios: reference paths and start states of both drones (envs/scenarios.py)
 # ---------------------------------------------------------------------------
@@ -284,6 +297,7 @@ class EnvCfg:
     action: ActionCfg = field(default_factory=ActionCfg)
     scenario: ScenarioCfg = field(default_factory=ScenarioCfg)
     top_controller: ControllerCfg = field(default_factory=ControllerCfg)
+    robust_controller: RobustControllerCfg = field(default_factory=RobustControllerCfg)  # bottom baseline
     drag: DragCfg = field(default_factory=DragCfg)
     aero: AeroCfg = field(default_factory=AeroCfg)
     randomization: RandomizationCfg = field(default_factory=RandomizationCfg)
