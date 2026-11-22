@@ -121,12 +121,29 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   Appended to `SCENARIOS`, so existing scenario indices are unchanged. Off by default;
   `train_phase1 --with-figure8` uses hover_over / pass_over / approach_hover_leave 0.15,
   far 0.1, circle_same / circle_opposite 0.1, figure8_same / figure8_opposite 0.125.
+- Bottom baseline (2026-11-22): **geometric + UDE** (`RobustGeometricController`,
+  `RobustControllerCfg` = `EnvCfg.robust_controller`), replacing the plain geometric
+  controller in `evaluate.py`; the top drone keeps the plain one (`top_controller`). The UDE
+  low-pass filters the nominal model's residual into a lumped force (inertial) and torque
+  (body) estimate and subtracts it from the commanded force and torque: d̂ = G_f[ṗ − u],
+  G_f = 1/(T s + 1), p = m v / J ω, u = nominal applied wrench from the commanded rotor
+  speeds (after clipping) minus gravity / ω × Jω. Implemented without differentiating the
+  state: d̂ = (p − ξ)/T, ξ̇ = (p + T u − ξ)/T. Uses only the drone's own state and commands
+  (like φ), nominal parameters, ki = 0; estimates clamped to ±0.5 weight / ±2 N m; reset
+  to 0 at episode start. T = 0.1 s (force) / 0.05 s (torque), confirmed 2026-11-22 (0.05 / 0.03 s tracked
+  better without sensor noise; kept slower with hardware noise in mind). Rationale: a
+  non-learned disturbance estimator is the fair counterpart of the adaptation module (the
+  plain controller, 17–36 cm, only showed the cost of not estimating at all).
 - Evaluation (2026-11-21, `eval/` + `scripts/evaluate.py`): every controller (policy,
   geometric baseline, z ablations; Phase 2's φ policy later) flies the same seeded episodes,
   one per env. Metrics per scenario: crashes, return, position / velocity / rate RMS,
   tilt and yaw error, action rate, saturation, and position / tilt error binned by the
   minimum rotor thrust ratio (wake strength, no single threshold). Tracking metrics skip
   the first 2 s (start transient). Results log: `CLAUDE.md`.
+  Phase 2 (`--phase 2`, 2026-11-22): `Phase2Policy` flies π on ẑ at the deployment rates
+  (π every step; φ every `adaptation_decimation` = 2 steps and at each episode's first
+  step, ẑ held in between) and records ‖ẑ − μ(e_t)‖² per step; on the same episodes the
+  same π flies with the true z ("z=true", RMA's Expert), plus z=0 / z=mean with `--ablate-z`.
 - Downwash: analytic model.
 - Rotor model (2026-11-20): **BEMT** (option B), not the linear efficiency law (option A,
   its linearization at hover). Same cost; BEMT gets the larger loss in a strong wake

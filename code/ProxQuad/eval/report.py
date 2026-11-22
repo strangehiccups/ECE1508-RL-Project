@@ -43,6 +43,8 @@ def print_summary(results: dict[str, dict]) -> None:
         for n in names:
             d = results[n][g]
             print(f"  {n:<{w}s}" + " ".join(format(d[k], f) for _, k, f in COLUMNS))
+            if "z_mse_mean" in d:
+                print(f"  {'':<{w}s}||z_hat - z||^2 {d['z_mse_mean']:.2f}")
             why = [f"{k[6:-4]} {v:.1f}%" for k, v in d.items()
                    if k.startswith("crash_") and k != "crash_pct" and v > 0]
             if why:

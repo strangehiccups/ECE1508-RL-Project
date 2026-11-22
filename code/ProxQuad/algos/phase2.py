@@ -72,28 +72,6 @@ class Phase2Trainer:
         """Regression target z_t from the frozen encoder."""
         return self.encoder(obs["priv"])
 
-    @torch.no_grad()
-    def estimate(self, just_reset: torch.Tensor | None = None) -> torch.Tensor:
-        """Refresh z_hat every adaptation_decimation steps; call once per env step, before
-        acting. just_reset (N,) bool: envs whose episode just restarted get a fresh z_hat
-        instead of carrying the previous episode's."""
-        h = self.env.get_history()
-        if self.k % self.cfg.adaptation_decimation == 0:
-            # Predict z_hat at every adaptation step
-            self.z_hat = self.phi(h["bottom"], h["top"])
-        elif just_reset is not None and just_reset.any():
-            # Update z_hat in env ids that is just reset with new history before the next adaptation step
-            ids = just_reset.nonzero().squeeze(-1)
-            self.z_hat[ids] = self.phi(h["bottom"][ids], h["top"][ids])
-        self.k += 1
-        return self.z_hat
-
-    @torch.no_grad()
-    def act(self, obs: dict[str, torch.Tensor], just_reset: torch.Tensor | None = None):
-        # Outputs deterministic action act_mean
-        z_hat = self.estimate(just_reset)
-        return self.policy.act_mean(obs, z_hat)
-
     def collect_and_update(self, learn: bool = True) -> dict[str, float]:
         """Returns means over the rollout, logged under train/ (z_var enables the *_rel ratios):
             loss          ||phi(h_t) - z_t||^2  (summed over z dims, mean over envs)

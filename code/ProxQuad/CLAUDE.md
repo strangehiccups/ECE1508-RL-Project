@@ -10,7 +10,7 @@ The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
 - Train: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase1 --log-dir runs/<name> [--iterations N] [--with-circles | --with-figure8] [--sanity]`
 - Train Phase 2 (φ): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase2 --phase1 runs/<phase1>/model.pt --log-dir runs/<name> [--with-circles | --with-figure8] [--iterations N]`
   (use the teacher's scenario mix; `collect_and_update` still to be written)
-- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--ablate-z] [--scenarios ...]`
+- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...]`
   writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs)
 - Video: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.view_episode --checkpoint runs/<name>/model.pt --scenario <s> --video out.mp4`
   (the live viewer without `--video` opens a window: give the user the command, don't leave it running)
@@ -30,7 +30,8 @@ downwash on), 4096 envs, all 6 scenarios equally likely, one 15 s episode each, 
 deterministic policy (`act_mean`, z = μ(e_t)). Tracking errors over t ≥ 2 s (skips the
 start transient from up to ±0.3 m initial offset); crash % and return over the whole
 episode. Every controller flies the same episodes. `geometric` = Lee controller on the
-nominal model (`top_controller` gains, no integral term). `z=0` / `z=mean`: π with z
+nominal model (`top_controller` gains, no integral term); from 2026-11-22 `evaluate.py`
+uses `geometric+UDE` instead (README, "Bottom baseline"), so older tables show the plain one. `z=0` / `z=mean`: π with z
 replaced, to test whether π uses z.
 
 ### 2026-11-21 · phase1_pilot (`runs/phase1_pilot`)
@@ -108,7 +109,12 @@ Findings:
   ~20 cm for the geometric controller.
 - To check (env, not policy): at t ≈ 0 the minimum rotor thrust ratio dips to ~0.07 for a
   few steps, with every controller. It looks like an aero-model initialization artifact at
-  reset.
+  reset. Measured 2026-11-22 (1024 envs, geometric controller): only in scenarios that
+  start in the wake (far: ratio 1.000 throughout). hover_over: mean min-rotor ratio 0.77
+  at t = 0, 0.66 at step 1, back to 0.77 by step ~7 (28 ms); the worst env reaches 0 at
+  steps 1–4 while its mean rotor speed drops from 419 to ~355 rad/s. Likely cause: the
+  wake is instantaneous, so the bottom drone starts inside a fully developed wake; a
+  lower rotor speed in the same inflow gives less thrust ratio (BEMT). Not fixed.
 
 ### 2026-11-21 · phase1_pilot2000 (`runs/phase1_pilot2000`): control for the circle run
 
@@ -167,6 +173,170 @@ Findings:
   up to 3.8 cm below 0.7).
 - Videos (`runs/videos/`, 30 s = two episodes): `policy_figure8_same.mp4`,
   `policy_figure8_opposite.mp4` (circles model), `geometric_figure8_*.mp4`.
+
+### 2026-11-22 · phase2_circles (`runs/phase2_circles`): first φ training
+
+Training: `train_phase2 --phase1 runs/phase1_circles/model.pt --with-circles` (μ, π
+frozen from the circle run; same scenario mix), RMA method, 1000 iterations × 4096 envs ×
+20 steps (82 M env steps), one Adam step per iteration, about 14 min. Log:
+`runs/phase2_circles.log`.
+
+| iteration | 0 | 100 | 200 | 400 | 600 | 800 | 1000 |
+|---|---|---|---|---|---|---|---|
+| MSE / Var(z) | 1.19 | 0.48 | 0.44 | 0.30 | 0.25 | 0.22 | 0.18 |
+
+- Var(z) ≈ 71 (summed over the 8 dims). Deployed error (the held ẑ π flew on) equals the
+  training MSE to 3 digits: the 2-step hold costs nothing measurable.
+- No crashes at any point, also with the random initial φ. Return under ẑ ≈ 1440 once
+  full episodes finish (iteration ~190), the same as Phase 1 with the true z. Return
+  alone does not show tracking quality: that needs the evaluation.
+- Not converged: MSE / Var(z) still falling (0.22 → 0.18 over the last 200 iterations).
+
+Evaluation (`evaluate --phase 2 --ablate-z`, usual conditions, all 8 scenarios, ~510
+episodes each; `policy` = π on ẑ at the deployment rates, `z=true` = the same π on
+μ(e_t), i.e. phase1_circles; position RMS in cm, p95 in brackets; ‖ẑ − z‖² per step):
+
+| scenario | policy (ẑ) | z=true | z=mean | z=0 | geometric | ‖ẑ − z‖² |
+|---|---|---|---|---|---|---|
+| hover_over | 1.81 (3.37) | 1.77 | 3.70 | 4.14 | 36.0 | 17.5 |
+| pass_over | 0.85 (1.48) | 0.77 | 3.50 | 4.34 | 22.4 | 4.2 |
+| approach_hover_leave | 1.38 (2.56) | 1.33 | 3.72 | 4.47 | 27.4 | 9.8 |
+| far | 0.36 (0.64) | 0.21 | 3.28 | 4.20 | 17.5 | 1.2 |
+| circle_same | 2.36 (3.99) | 2.10 | 3.98 | 4.53 | 34.5 | 20.6 |
+| circle_opposite | 1.51 (2.55) | 1.15 | 3.69 | 4.60 | 20.7 | 11.7 |
+| figure8_same (unseen) | 2.51 (3.92) | 2.14 | 3.98 | 4.46 | 36.1 | 26.7 |
+| figure8_opposite (unseen) | 1.87 (2.95) | 1.02 | 3.51 | 4.38 | 20.6 | 23.5 |
+| all | 1.57 (3.28) | 1.30 | 3.67 | 4.39 | 26.8 | 14.4 |
+
+Wake bins, all scenarios (none / 0.9–1 / 0.8–0.9 / 0.7–0.8 / < 0.7): policy 1.11 / 1.44 /
+1.81 / 2.49 / 3.39 cm; z=true 0.62 / 0.93 / 1.48 / 2.33 / 3.43 cm.
+
+Findings:
+- φ closes 89 % of the gap between z=mean and the true z (3.67 → 1.57 cm, against 1.30).
+  No crashes for any learned controller; return 1443 against 1450.
+- The remaining gap is largest OUT of the wake (none: 1.11 against 0.62 cm; far: 0.36
+  against 0.21) and gone in the strongest wake (< 0.7: 3.39 against 3.43). Suggests φ
+  recovers the downwash part of z but less of the episode constants (mass, motors, CoM,
+  gust), which a 0.5 s window shows only weakly: the case for the GRU memory (README
+  "Planned"). Not yet tested (e.g. per-component ẑ error).
+- Largest gap and ẑ error on the unseen figure8_opposite (1.87 against 1.02 cm, 23.5).
+- Training was not converged (MSE / Var(z) still falling), so a longer run may narrow
+  the gap; the out-of-wake gap points at the window length, not only training time.
+- Videos (`runs/videos/`, 30 s, seed 0): `RMA_circles_same/opposite.mp4`,
+  `RMA_figure8_same/opposite.mp4` (this model), `policy_circles_same.mp4` (phase1_circles,
+  true z), `geometric_circles_same.mp4`.
+
+### 2026-11-22 · phase2_circles_3000 (`runs/phase2_circles_3000`): longer φ training
+
+Same as phase2_circles but 3000 iterations (246 M env steps, ~45 min with other jobs on
+the GPU). MSE / Var(z): 0.272 (500), 0.180 (1000), 0.153 (1500), 0.137 (2000), 0.138
+(2500), 0.136 (3000): converged by ~2000. No crashes.
+
+Evaluation (`evaluate --phase 2 --ablate-z`, 4096 envs, all 8 scenarios; baseline now
+geometric+UDE, default T = 0.1 / 0.05 s; position RMS cm):
+
+| scenario | ẑ, 3000 its | ẑ, 1000 its | z=true | geometric+UDE | ‖ẑ − z‖² (3000 / 1000) |
+|---|---|---|---|---|---|
+| hover_over | 1.79 | 1.81 | 1.77 | 2.45 | 13.9 / 17.5 |
+| pass_over | 0.79 | 0.85 | 0.77 | 1.28 | 3.0 / 4.2 |
+| approach_hover_leave | 1.34 | 1.38 | 1.33 | 1.84 | 7.4 / 9.8 |
+| far | 0.25 | 0.36 | 0.21 | 0.15 | 0.7 / 1.2 |
+| circle_same | 2.20 | 2.36 | 2.10 | 2.51 | 15.8 / 20.6 |
+| circle_opposite | 1.20 | 1.51 | 1.15 | 1.76 | 5.3 / 11.7 |
+| figure8_same (unseen) | 2.27 | 2.51 | 2.14 | 2.79 | 19.1 / 26.7 |
+| figure8_opposite (unseen) | 1.24 | 1.87 | 1.02 | 1.60 | 8.1 / 23.5 |
+| all (p95) | 1.38 (3.05) | 1.57 (3.28) | 1.30 (3.00) | 1.79 (3.90) | 9.1 / 14.4 |
+
+Wake bins, all (none / 0.9–1 / 0.8–0.9 / 0.7–0.8 / < 0.7): ẑ 0.75 / 1.09 / 1.61 / 2.36 /
+3.30; z=true 0.62 / 0.93 / 1.48 / 2.33 / 3.43; geometric+UDE 0.83 / 1.57 / 1.94 / 3.34 /
+5.08 cm.
+
+Findings:
+- φ now closes 97 % of the gap between z=mean and the true z (1000 its: 89 %).
+- The out-of-wake gap was mostly training time, not the 0.5 s window: 1.11 → 0.75 cm
+  against 0.62 with the true z. The largest remaining gap is figure8_opposite (unseen).
+- π on ẑ beats geometric+UDE in every scenario except far (0.25 against 0.15) and in
+  every wake bin; the margin grows with wake strength (3.30 against 5.08 cm below 0.7).
+- No crashes for any controller.
+
+### 2026-11-22 · geometric + UDE baseline (no training)
+
+`RobustGeometricController` on the bottom drone, nominal ranges, all 8 scenarios, 1024
+envs, seed 0 (position RMS in cm):
+
+| controller | crash | all (p95) | hover_over | far | circle_same | circle_opp | figure8_same | figure8_opp |
+|---|---|---|---|---|---|---|---|---|
+| geometric (plain) | 0.10 % | 26.3 (54.6) | 34.1 | 17.9 | 34.4 | 20.6 | 34.8 | 20.4 |
+| UDE T = 0.1 / 0.05 s (default) | 0 | 1.74 (3.8) | 2.3 | 0.1 | 2.4 | 1.8 | 2.6 | 1.7 |
+| UDE T = 0.05 / 0.03 s | 0 | 1.46 (3.3) | 1.9 | 0.1 | 2.2 | 1.5 | 2.3 | 1.4 |
+| UDE T = 0.2 / 0.1 s | 0 | 2.38 (4.9) | 2.7 | 0.2 | 3.0 | 2.7 | 3.2 | 2.6 |
+
+- The UDE baseline is as good as the learned policy: 1.74 / 1.46 cm against 1.57 (π on
+  ẑ) and 1.30 (π on true z) in the phase2_circles evaluation (4096 envs; same scenarios
+  and seed, different env count). Out of the wake it is far better (0.1 against 0.36 /
+  0.21 cm): it cancels constant disturbances exactly, π has no integrator.
+- Faster filters track better here, but the sim has no sensor noise; on hardware a fast
+  UDE filter amplifies noise. φ also sees the true state, so the comparison is fair in
+  sim, but the time constant should be chosen with noise in mind.
+
+### 2026-11-22 · out-of-range survival (phase2_circles, geometric+UDE, plain geometric)
+
+2048 envs, all 8 scenarios equally likely, seed 0, one 15 s episode each; one condition
+changed at a time. Randomization ×s widens each range around its centre (mass, inertia
+xy / z, motor factor) and scales CoM offset and gust by s. Wake gain = `WakeCfg.speed_gain`
+(trained 0.8–2.0). Gap = `TopPathCfg.dz` (trained 0.5–2.0 m; the collision ellipsoid is
+0.35 m tall; 0.38–0.45 needs `start_clearance` 1.05). Scripts: scratchpad `ood.py` /
+`ood_ude.py`; logs `runs/phase2_circles_ood*.log`, JSON `runs/phase2_circles/ood*.json`.
+Survival % (position RMS cm); 1 episode = 0.05 %:
+
+| condition | π on ẑ | π on true z | geometric+UDE | geometric |
+|---|---|---|---|---|
+| nominal | 100 (1.56) | 100 (1.29) | 100 (1.75) | 99.85 (26.3) |
+| randomization ×1.5 | 100 (2.17) | 100 (1.54) | 100 (1.91) | 99.41 (33.4) |
+| randomization ×2 | 100 (3.42) | 99.90 (2.13) | 100 (2.57) | 98.83 (41.5) |
+| wake gain 2.0–2.5 | 100 (2.23) | 100 (2.06) | 100 (3.73) | 99.95 (37.8) |
+| wake gain 2.5–3.0 | 100 (2.70) | 100 (2.58) | 99.95 (6.77) | 99.56 (46.0) |
+| gap 0.45–0.5 m | 99.95 (1.69) | 99.95 (1.44) | 99.90 (2.02) | 94.29 (28.2) |
+| gap 0.38–0.45 m | 99.22 (1.70) | 99.17 (1.45) | 99.51 (2.06) | 87.16 (28.5) |
+
+Findings:
+- Survival holds for both learned controllers and geometric+UDE in every condition
+  (≥ 99.2 %); all crashes except 2 episodes are collisions. Differences below ~0.2 %
+  are a few episodes.
+- Wider randomization hurts φ most: ×2 doubles its error (1.56 → 3.42 cm) against
+  1.29 → 2.13 with the true z and 1.75 → 2.57 for the UDE. φ extrapolates parameter
+  identification worse than a model-free estimator.
+- A stronger wake hurts the UDE most: 1.75 → 6.77 cm at gain 2.5–3.0, against
+  1.56 → 2.70 for π on ẑ. Likely because the UDE only reacts (0.1 s filter), while π
+  sees the top drone's state directly and can act before the sag builds up (not tested).
+- Smaller gaps: collisions in all controllers, mostly on the opposite-direction paths
+  (crossings); the learned and UDE controllers lose 0.5–0.8 % at 0.38–0.45 m, the plain
+  geometric controller (20–35 cm tracking error) 13 %.
+
+### 2026-11-22 · out-of-range survival, phase2_circles_3000
+
+Same setup as the table above (2048 envs, 8 scenarios, seed 0), with the 3000-iteration
+φ. Randomization ×3 was dropped: independent xy / z inertia factors stay physically valid
+(Izz ≤ Ixx + Iyy at every range corner) only up to ×2.08. Script: scratchpad `ood2.py`;
+log `runs/phase2_circles_3000_ood.log`, JSON `runs/phase2_circles_3000/ood.json`.
+Survival % (position RMS cm):
+
+| condition | π on ẑ | π on true z | geometric+UDE | geometric |
+|---|---|---|---|---|
+| nominal | 100 (1.36) | 100 (1.29) | 100 (1.75) | 99.85 (26.3) |
+| randomization ×2 | 100 (2.99) | 99.90 (2.13) | 100 (2.57) | 98.83 (41.5) |
+| wake gain 2.5–3.0 | 100 (2.54) | 100 (2.58) | 99.95 (6.77) | 99.56 (46.0) |
+| gap 0.38–0.45 m | 99.22 (1.51) | 99.17 (1.45) | 99.51 (2.06) | 87.16 (28.5) |
+
+- Longer training helps out of range too (1000 → 3000 its: ×2 3.42 → 2.99, gain
+  2.70 → 2.54, gap 1.70 → 1.51 cm); survival unchanged.
+- Under wider randomization φ still trails the UDE (2.99 against 2.57 cm); under the
+  strong wake π on ẑ matches the true z (2.54 / 2.58) and stays far ahead of the UDE (6.77).
+- Small-gap survival is identical to the 1000-iteration φ (99.22 %) and close to the true
+  z: suggests geometry (crossings within 3–10 cm of the ellipsoid) rather than estimation
+  (episodes not compared one by one).
+- Videos (`runs/videos/`, 15 s, one episode, seed 0): `RMA_circles_same/opposite.mp4`
+  (this model), `robust_geometric_circles_same/opposite.mp4` (geometric+UDE).
 
 Next candidates: a yaw term in the reward (if yaw matters on hardware), the reset-time
 thrust-ratio dip in the aero model, an integral term for the geometric baseline, and more

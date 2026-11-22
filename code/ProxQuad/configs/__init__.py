@@ -18,6 +18,7 @@ from .default import (
     PPOCfg,
     RandomizationCfg,
     RewardCfg,
+    RobustControllerCfg,
     RotorCfg,
     ScenarioCfg,
     SimCfg,
