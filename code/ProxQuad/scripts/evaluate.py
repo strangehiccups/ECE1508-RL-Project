@@ -23,8 +23,9 @@ from pathlib import Path
 from ..configs import EnvCfg
 from ..envs import ProxQuadEnv
 from ..envs.scenarios import SCENARIOS
-from ..eval import (Phase1Policy, Phase2Policy, RobustGeometricBaseline, load_phase1, load_phase2,
-                    print_summary, rollout, save_plots, save_summary, summarize)
+from ..eval import (GeometricBaseline, Phase1Policy, Phase2Policy, RobustGeometricBaseline,
+                    load_phase1, load_phase2, print_summary, rollout, save_plots, save_summary,
+                    summarize)
 
 
 def parse_args():
@@ -35,6 +36,8 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
     p.add_argument("--no-baseline", action="store_true", help="skip the geometric+UDE baseline")
+    p.add_argument("--plain-geometric", action="store_true",
+                   help="also run the geometric controller without UDE (left out of the plots)")
     p.add_argument("--ablate-z", action="store_true", help="also run pi with z = 0 and z = mean z")
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the mean")
     p.add_argument("--no-downwash", action="store_true")
@@ -76,6 +79,8 @@ def main() -> None:
         controllers = [policy]
     if not args.no_baseline:
         controllers.append(RobustGeometricBaseline(env))
+    if args.plain_geometric:
+        controllers.append(GeometricBaseline(env))
 
     recs = []
     for ctrl in controllers:
@@ -95,7 +100,8 @@ def main() -> None:
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / "eval"
     save_summary(results, out)
     if not args.no_plots:
-        save_plots(recs, args.scenarios, out, settle_s=args.settle_s)
+        save_plots([r for r in recs if r.name != "geometric"], args.scenarios, out,
+                   settle_s=args.settle_s)
     print(f"\nwrote {out}/summary.json, summary.csv" + ("" if args.no_plots else ", *.png"))
 
 

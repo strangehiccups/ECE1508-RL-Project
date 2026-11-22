@@ -16,7 +16,7 @@ The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
 - Train: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase1 --log-dir runs/<name> [--iterations N] [--with-circles | --with-figure8] [--sanity]`
 - Train Phase 2 (φ): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase2 --phase1 runs/<phase1>/model.pt --log-dir runs/<name> [--with-circles | --with-figure8] [--iterations N]`
   (use the teacher's scenario mix; `collect_and_update` still to be written)
-- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...] [--sensors | --noise-scale S] [--no-downwash]`
+- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...] [--sensors | --noise-scale S] [--no-downwash] [--plain-geometric]`
   writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs incl. `<scenario>_onset.png`)
 - Stress tests (Phase 2 checkpoint vs geometric+UDE at several filter pairs): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.stress --checkpoint runs/<phase2>/model.pt [--conditions ...] [--envs N]`
   writes `runs/<phase2>/stress/` (stress.json, stress.csv)
@@ -472,6 +472,17 @@ Findings:
 - The gap condition is collision-limited for every controller (margin p5 0.07–0.11,
   ~1 % lost).
 - No sensor conditions here: π needs retraining with the latency first.
+
+### 2026-11-22 · controller comparison report
+
+`docs/controller_comparison_phase2_circles_3000.md` (figures and `make_figures.py` in
+`docs/figures/phase2_circles_3000/`): π on ẑ, π on true z, z = 0 / z = mean, geometric+UDE
+and plain geometric on all 9 scenarios (4096 envs, `runs/phase2_circles_3000/eval_report/`),
+the shuttle without downwash (`eval_report_shuttle_nodw/`), the stress tests above, an
+onset-aligned shuttle run (4096 envs, 11.8 k onsets: command lead −28 / −28 / −88 ms, mean
+height sag 0.28 / 0.07 / 2.95 cm for π on ẑ / true z / UDE) and batch-1 CPU latency (π
+0.04 ms, φ 0.22 ms median on the i5-10600K, TorchScript, one thread). Numbers identical to
+the `eval_metrics` run (same code and seed).
 
 Next candidates: a yaw term in the reward (if yaw matters on hardware), the reset-time
 thrust-ratio dip in the aero model, an integral term for the geometric baseline, and more
