@@ -138,10 +138,22 @@ class CircleCfg:
 
 
 @dataclass
+class Figure8Cfg:
+    """figure8_same / figure8_opposite: both drones on a lemniscate of Gerono around the
+    bottom target, the top drone dz higher. Parameter rate w = speed / half_width: speed
+    at the lobe tips, x1.41 at the centre crossing. [CONFIRM all ranges]"""
+    half_width: Range = (1.5, 3.0)       # bottom drone's centre-to-lobe-tip distance a [m]
+    speed: Range = (0.5, 1.2)            # bottom drone's speed at the lobe tips [m/s]; |acc| <= 2.1 v^2/a
+    size_offset: Range = (-0.4, 0.4)     # top half-width - bottom half-width [m]
+    arc_offset: Range = (-0.8, 0.8)      # figure8_same: top drone's lead, ~ along the path [m]
+
+
+@dataclass
 class ScenarioCfg:
     bottom: BottomPathCfg = field(default_factory=BottomPathCfg)
     top: TopPathCfg = field(default_factory=TopPathCfg)
     circle: CircleCfg = field(default_factory=CircleCfg)
+    figure8: Figure8Cfg = field(default_factory=Figure8Cfg)
     start_clearance: float = 1.25        # start outside the collision ellipsoid x this [CONFIRM]
 
 
@@ -381,10 +393,12 @@ class Phase2Cfg:
         obs=ObsCfg(bottom_history_len=125, top_history_len=125)))
     adaptation_decimation: int = 2
     adaptation: AdaptationCfg = field(default_factory=AdaptationCfg)
-    phase1_checkpoint: str = "runs/phase1/model.pt"
+    phase1_checkpoint: str = "runs/phase1_circles/model.pt"
     iterations: int = 1000
-    rollout_steps: int = 60       # 0.24 s at 250 Hz
+    rollout_steps: int = 20       # one Adam step per rollout: 20 x 4096 = 82k samples (RMA: 80k)
     lr: float = 5e-4
+    warmup_rollouts: int = 1      # feed phi's normalizers before the first Adam step
+    save_interval: int = 50       # iterations
     seed: int = 0
     log_dir: str = "runs/phase2"
     checkpoint: str = "runs/phase2/model.pt"

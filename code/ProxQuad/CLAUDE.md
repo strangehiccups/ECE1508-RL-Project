@@ -7,12 +7,21 @@ the results log. `runs/` is gitignored, so results live only on this machine and
 
 The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
 
-- Train: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase1 --log-dir runs/<name> [--iterations N] [--with-circles] [--sanity]`
+- Train: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase1 --log-dir runs/<name> [--iterations N] [--with-circles | --with-figure8] [--sanity]`
+- Train Phase 2 (φ): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase2 --phase1 runs/<phase1>/model.pt --log-dir runs/<name> [--with-circles | --with-figure8] [--iterations N]`
+  (use the teacher's scenario mix; `collect_and_update` still to be written)
 - Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--ablate-z] [--scenarios ...]`
   writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs)
 - Video: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.view_episode --checkpoint runs/<name>/model.pt --scenario <s> --video out.mp4`
   (the live viewer without `--video` opens a window: give the user the command, don't leave it running)
 - TensorBoard: `uv run tensorboard --logdir runs/<name>`
+
+Scenarios (`envs/scenarios.py`, in `SCENARIOS` order): hover_over, pass_over,
+approach_hover_leave, far, circle_same, circle_opposite, figure8_same, figure8_opposite.
+The default training mix uses the first 4; `--with-circles` adds the circles and
+`--with-figure8` adds circles and figure-8s (mixes in `scripts/train_phase1.py`). Evaluation
+and `view_episode --scenario` cover all 8. Results below that list 6 scenarios predate the
+figure-8s; re-evaluating a checkpoint adds them (unseen).
 
 ## Results log
 
@@ -135,6 +144,29 @@ Conclusions (one seed per run, so differences of ~10 % may be seed noise):
   reference more than it does in hover, which would make the reward penalize it indirectly.
 - Every run uses z: the ablations stay at 3.6–5.7 cm.
 - No crashes for any trained policy in any scenario.
+
+### 2026-11-21 · figure-8 scenarios, no figure-8 training (`runs/<name>/eval_figure8`)
+
+Existing checkpoints evaluated on the 4 moving-path scenarios only (`--scenarios circle_same
+circle_opposite figure8_same figure8_opposite`, ~1000 episodes each, otherwise the usual
+conditions). Neither model saw a figure-8 in training; the pilot never saw a moving path.
+
+| scenario | circles (2000) | pilot (1000) | geometric | crashes |
+|---|---|---|---|---|
+| circle_same | 2.10 (3.88) | 3.24 (5.60) | 34.4 | 0 |
+| circle_opposite | 1.16 (1.88) | 2.47 (4.43) | 20.7 | 0 (geometric 0.7 %) |
+| figure8_same | 2.19 (4.00) | 3.13 (5.31) | 35.3 | 0 |
+| figure8_opposite | 1.02 (1.60) | 2.04 (3.11) | 20.9 | 0 (geometric 0.3 %) |
+
+Findings:
+- Both models fly the figure-8s as well as the circles without training on them: same-
+  direction ≈ circle_same, opposite slightly better than circle_opposite (cause not
+  established; it is not less wake exposure, 43 % of steps in a wake vs 39 %). The varying curvature and the faster centre
+  crossing (1.41 v) cost nothing measurable.
+- Same wake-strength dependence as before (circles model, figure8_same: 1.2 cm at 0.9–1
+  up to 3.8 cm below 0.7).
+- Videos (`runs/videos/`, 30 s = two episodes): `policy_figure8_same.mp4`,
+  `policy_figure8_opposite.mp4` (circles model), `geometric_figure8_*.mp4`.
 
 Next candidates: a yaw term in the reward (if yaw matters on hardware), the reset-time
 thrust-ratio dip in the aero model, an integral term for the geometric baseline, and more

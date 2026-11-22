@@ -23,7 +23,7 @@ lets it tell "heavy" from "in the wake" and predict the downwash.
 
 **Status:** environment built and smoke-tested; networks μ, π, critic, φ implemented
 (`models/`). Phase 1 PPO (`algos/phase1.py` + `algos/storage.py`) trains; pilot and
-circle runs evaluated (results log in `CLAUDE.md`). Phase 2 loop: stub.
+circle runs evaluated (results log in `CLAUDE.md`). Phase 2 trainer around a `collect_and_update` stub.
 
 ## Layout
 
@@ -109,6 +109,18 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   stays the 4 original scenarios); `train_phase1 --with-circles` uses hover_over /
   pass_over / approach_hover_leave 0.2, far 0.1, circle_same / circle_opposite 0.15. With
   no circle enabled, `bottom_reference` keeps the set-point path (acc = None).
+- Figure-8 scenarios (2026-11-21, `Figure8Cfg`): `figure8_same` and `figure8_opposite`,
+  set up like the circles but on a lemniscate of Gerono, x = a sin θ, y = (a/2) sin 2θ,
+  θ = θ₀ + w t, centred on the target and turned to a random heading ψ (shared by both
+  drones). Chosen over Bernoulli for its simple closed-form derivatives: pos, vel, acc and
+  jerk are exact, so the flat reference gives R_ref and ω_ref directly. Bottom drone:
+  a ∈ 1.5–3.0 m, w = ±v/a with v ∈ 0.5–1.2 m/s (v at the lobe tips, 1.41 v at the centre
+  crossing, peak |acc| ≈ 2.1 v²/a ≤ 2.0 m/s²). Top drone: dz higher on half-width a + δa
+  (δa ∈ ±0.4 m); same w with a lead of ±0.8 m / a in θ (≈ ±0.8 m along the path), or −w
+  (the path flown backwards) from a random phase, meeting near the centre and on the lobes.
+  Appended to `SCENARIOS`, so existing scenario indices are unchanged. Off by default;
+  `train_phase1 --with-figure8` uses hover_over / pass_over / approach_hover_leave 0.15,
+  far 0.1, circle_same / circle_opposite 0.1, figure8_same / figure8_opposite 0.125.
 - Evaluation (2026-11-21, `eval/` + `scripts/evaluate.py`): every controller (policy,
   geometric baseline, z ablations; Phase 2's φ policy later) flies the same seeded episodes,
   one per env. Metrics per scenario: crashes, return, position / velocity / rate RMS,
@@ -248,6 +260,30 @@ simulators. Skeleton: `Phase1Trainer` (`algos/phase1.py`), `RolloutStorage`
 - Defaults from rsl_rl (5 epochs × 4 minibatches, clip 0.2, lr 1e-3 adaptive on
   KL = 0.01, entropy 0.005, clipped value loss); γ = 0.99^0.4, λ = 0.95^0.4 for 250 Hz.
 - Sanity run first: `train_phase1 --sanity` (aero off, top drone always far: plain hover).
+
+Phase 2 training (2026-11-22): **RMA's method** (paper §III-B, §IV-B, supplement
+Algorithm 1), `Phase2Trainer` (`algos/phase2.py`).
+- On-policy, DAgger-style: π (frozen, `act_mean`) flies on ẑ from the current φ, starting
+  from a random φ; each history is paired with the true z_t = μ(e_t).
+- No stored histories. RMA stores (ẑ_t, z_t) with ẑ's graph and steps once per
+  iteration; keeping a rollout's graphs alive would need ~8 GB here (20 steps × 4096).
+  Instead each step's loss ‖φ(h_t) − z_t‖² / T is backpropagated at once and the
+  gradients accumulate: the same update, with one step's graph in memory.
+- One Adam step per rollout (Algorithm 1; lr 5e-4, RMA's). No minibatch split: the data is
+  used once, in time order, so a split would only set the Adam step interval. The rollout
+  is the batch: `rollout_steps` = 20 × 4096 envs = 82 k samples (RMA: 80 k); 1000
+  iterations = 82 M env steps (RMA: 80 M).
+- φ runs with grad at every step for the loss (as in RMA training); π acts on the ẑ held
+  at φ's deployment rate (refreshed every 2 steps and for envs that just reset).
+- φ's normalizers: updated every step from the newest history entry only (each step
+  counted once), skipping envs that just reset (their newest entry is zero padding);
+  cumulative, never frozen; one warm-up rollout without Adam steps. μ's and π's stay at
+  their Phase 1 values.
+- Logged: training MSE, the MSE of the ẑ π acted on (deployed error), both also relative
+  to Var(z), and episode return / crashes under ẑ (Phase 1 with z: ~1440).
+- Checkpoint is self-contained: φ, μ, π and both phases' configs. Teacher by default
+  `runs/phase1_circles`; `train_phase2` takes the same scenario-mix flags as Phase 1
+  (train φ on the teacher's mix).
 
 Planned (not yet): **residual mode** (2026-11-20, deferred by the user). `ActionCfg.mode`
 = "direct" | "residual". Residual: a geometric controller on the bottom drone with

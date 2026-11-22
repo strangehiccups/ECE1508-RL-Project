@@ -9,6 +9,7 @@ from .default import (
     DragCfg,
     EncoderCfg,
     EnvCfg,
+    Figure8Cfg,
     MotorCfg,
     ObsCfg,
     Phase1Cfg,

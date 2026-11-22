@@ -1,6 +1,6 @@
 """Per-episode scenarios: reference paths and start states of both drones, batched over envs.
 
-Bottom drone: hover at `target`, except in the circle scenarios.
+Bottom drone: hover at `target`, except in the circle and figure-8 scenarios.
 
 Top drone: start point A, hold point B, end point C,
     t < t0          hold at A
@@ -19,8 +19,13 @@ Circle scenarios (ScenarioCfg.circle): both drones circle the vertical axis thro
 target, the bottom drone at the target's height, the top drone dz higher (+ sway):
     circle_same           same angular rate, the top drone at a fixed arc offset
     circle_opposite       opposite angular rate, random phase: crossings every pi r / v
-When no circle scenario is enabled, bottom_reference stays the plain set-point (acc,
-jerk = None), so the env keeps its set-point error path.
+
+Figure-8 scenarios (ScenarioCfg.figure8): the same, on a lemniscate of Gerono centred on
+the target with a random heading (half-width a, lobes along the heading):
+    figure8_same          same parameter rate, the top drone at a phase lead
+    figure8_opposite      opposite parameter rate (path flown backwards), random phase
+When no circle or figure-8 scenario is enabled, bottom_reference stays the plain
+set-point (acc, jerk = None), so the env keeps its set-point error path.
 """
 
 import math
@@ -32,8 +37,9 @@ from ..utils.math import uniform
 from .controller import FlatRef
 
 SCENARIOS = ("hover_over", "pass_over", "approach_hover_leave", "far",
-             "circle_same", "circle_opposite")
+             "circle_same", "circle_opposite", "figure8_same", "figure8_opposite")
 CIRCLES = ("circle_same", "circle_opposite")
+EIGHTS = ("figure8_same", "figure8_opposite")
 NEVER = 1e6  # "t = infinity" that stays finite in arithmetic
 
 
@@ -45,6 +51,24 @@ def circle(t, r, w, th0, center, z):
     v = torch.stack([-s, c, zero], dim=-1)         # tangential
     pos = torch.stack([center[0] + r * c, center[1] + r * s, z.expand_as(th)], dim=-1)
     return (pos, (r * w)[:, None] * v, (-r * w**2)[:, None] * u, (-r * w**3)[:, None] * v)
+
+
+def figure8(t, a, w, th0, psi, center, z):
+    """Lemniscate of Gerono (a sin th, a/2 sin 2th) rotated by psi, th = th0 + w t
+    (w signed) -> pos, vel, acc, jerk (N, 3)."""
+    th = th0 + w * t
+    s1, c1, s2, c2 = th.sin(), th.cos(), (2 * th).sin(), (2 * th).cos()
+    cp, sp = psi.cos(), psi.sin()
+
+    def rot(x, y, zz):
+        return torch.stack([cp * x - sp * y, sp * x + cp * y, zz], dim=-1)
+
+    zero = torch.zeros_like(th)
+    pos = rot(a * s1, 0.5 * a * s2, z.expand_as(th) - center[2]) + center
+    vel = rot(a * w * c1, a * w * c2, zero)
+    acc = rot(-a * w**2 * s1, -2 * a * w**2 * s2, zero)
+    jerk = rot(-a * w**3 * c1, -4 * a * w**3 * c2, zero)
+    return pos, vel, acc, jerk
 
 
 class Scenarios:
@@ -64,10 +88,12 @@ class Scenarios:
         self.A, self.B, self.C = z3(), z3(), z3()   # start, hold, end points of the top drone's reference path
         self.t0, self.t1, self.t2, self.t3 = z1(), z1(), z1(), z1()    # start, hold, dwell, end times of the top drone's reference path
         self.sway_dir, self.sway_amp, self.sway_w, self.sway_phase = z3(), z1(), z1(), z1()
-        # circles: radius, signed angular rate, start angle; bottom (b) and top (t)
-        self.circles_on = any(cfg.top.scenario_probs.get(k, 0.0) > 0 for k in CIRCLES)
+        # circles / figure-8s: radius or half-width, signed rate, start phase, heading (8 only);
+        # bottom (b) and top (t)
+        self.paths_on = any(cfg.top.scenario_probs.get(k, 0.0) > 0 for k in CIRCLES + EIGHTS)
         self.is_circle = torch.zeros(num_envs, dtype=torch.bool, device=device)
-        self.r_b, self.w_b, self.th_b = z1(), z1(), z1()
+        self.is_eight = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self.r_b, self.w_b, self.th_b, self.psi = z1(), z1(), z1(), z1()
         self.r_t, self.w_t, self.th_t, self.z_t = z1(), z1(), z1(), z1()
 
     def resample(self, ids: torch.Tensor) -> None:
@@ -112,35 +138,47 @@ class Scenarios:
         self.sway_w[ids] = 2 * math.pi * uniform(cfg.sway_freq, k, dev)
         self.sway_phase[ids] = 2 * math.pi * torch.rand(k, device=dev)
 
-        # circles (drawn for every env, used where is_circle)
-        c = self.cfg.circle
-        same = is_("circle_same")
-        r_b = uniform(c.radius, k, dev)
+        # circles / figure-8s (drawn for every env, used where is_circle / is_eight)
+        c, e = self.cfg.circle, self.cfg.figure8
+        eight = is_("figure8_same") | is_("figure8_opposite")
+        pick = lambda r8, rc: torch.where(eight, uniform(r8, k, dev), uniform(rc, k, dev))  # noqa: E731
+        same = is_("circle_same") | is_("figure8_same")
+        r_b = pick(e.half_width, c.radius)
         sign = torch.where(torch.rand(k, device=dev) < 0.5, -1.0, 1.0)
-        w_b = sign * uniform(c.speed, k, dev) / r_b
+        w_b = sign * pick(e.speed, c.speed) / r_b
         th_b = 2 * math.pi * torch.rand(k, device=dev)
-        lead = th_b + sign * uniform(c.arc_offset, k, dev) / r_b
-        self.is_circle[ids] = same | is_("circle_opposite")
+        lead = th_b + sign * pick(e.arc_offset, c.arc_offset) / r_b
+        self.is_circle[ids] = is_("circle_same") | is_("circle_opposite")
+        self.is_eight[ids] = eight
         self.r_b[ids], self.w_b[ids], self.th_b[ids] = r_b, w_b, th_b
-        self.r_t[ids] = r_b + uniform(c.radius_offset, k, dev)
+        self.psi[ids] = 2 * math.pi * torch.rand(k, device=dev)
+        self.r_t[ids] = r_b + pick(e.size_offset, c.radius_offset)
         self.w_t[ids] = torch.where(same, w_b, -w_b)
         self.th_t[ids] = torch.where(same, lead, 2 * math.pi * torch.rand(k, device=dev))
         self.z_t[ids] = self.target[2] + dz
 
+    def _paths(self, t, r, w, th, z, hold):
+        """hold = (pos, vel, acc, jerk), replaced by the circle / figure-8 where enabled."""
+        for mask, path in ((self.is_circle, circle(t, r, w, th, self.target, z)),
+                           (self.is_eight, figure8(t, r, w, th, self.psi, self.target, z))):
+            m = mask[:, None]
+            hold = tuple(torch.where(m, p, h) for p, h in zip(path, hold))
+        return hold
+
     def bottom_reference(self, t: torch.Tensor) -> FlatRef:
-        """Hover at the target (acc, jerk, yaw = None) unless a circle scenario is
-        enabled; then pos, vel, acc, jerk for all envs, the circle where is_circle."""
+        """Hover at the target (acc, jerk, yaw = None) unless a circle / figure-8 scenario
+        is enabled; then pos, vel, acc, jerk for all envs, the path where it applies."""
         pos = self.target.expand(self.n, 3)
-        if not self.circles_on:
+        if not self.paths_on:
             return FlatRef(pos=pos, vel=torch.zeros_like(pos))
-        cp, cv, ca, cj = circle(t, self.r_b, self.w_b, self.th_b, self.target, self.target[2])
-        m, zero = self.is_circle[:, None], torch.zeros_like(pos)
-        return FlatRef(pos=torch.where(m, cp, pos), vel=torch.where(m, cv, zero),
-                       acc=torch.where(m, ca, zero), jerk=torch.where(m, cj, zero))
+        zero = torch.zeros_like(pos)
+        p, v, a, j = self._paths(t, self.r_b, self.w_b, self.th_b, self.target[2],
+                                 (pos, zero, zero, zero))
+        return FlatRef(pos=p, vel=v, acc=a, jerk=j)
 
     def top_reference(self, t: torch.Tensor) -> FlatRef:
         """t: (N,) seconds since episode start -> FlatRef with pos, vel, acc, jerk (N, 3);
-        yaw = 0. Off the circles, acc and jerk come from the sway only: the straight legs
+        yaw = 0. Off the circles / figure-8s, acc and jerk come from the sway only: the straight legs
         are constant velocity, and the impulses at their corners are left out."""
         d_in = (self.t1 - self.t0).clamp_min(1e-6)
         d_out = (self.t3 - self.t2).clamp_min(1e-6)
@@ -153,11 +191,9 @@ class Scenarios:
         out_leg = ((t >= self.t2) & (t < self.t3)).float()[:, None]
         vel = in_leg * (self.B - self.A) / d_in[:, None] + out_leg * (self.C - self.B) / d_out[:, None]
         acc, jerk = torch.zeros_like(pos), torch.zeros_like(pos)
-        if self.circles_on:
-            cp, cv, ca, cj = circle(t, self.r_t, self.w_t, self.th_t, self.target, self.z_t)
-            m = self.is_circle[:, None]
-            pos, vel = torch.where(m, cp, pos), torch.where(m, cv, vel)
-            acc, jerk = torch.where(m, ca, acc), torch.where(m, cj, jerk)
+        if self.paths_on:
+            pos, vel, acc, jerk = self._paths(t, self.r_t, self.w_t, self.th_t, self.z_t,
+                                              (pos, vel, acc, jerk))
 
         # sway: A sin(ph) along sway_dir, ph = w t + phase, differentiated exactly
         A, w, d = self.sway_amp, self.sway_w, self.sway_dir
