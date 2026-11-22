@@ -8,7 +8,7 @@ Memory: T x N x 4 B per signal, ~60 MB at 4096 envs x 15 s; moved to the CPU at 
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -17,6 +17,7 @@ from .controllers import Controller
 
 SIGNALS = (
     "pos_err",       # |p - p_ref| [m]
+    "z_err",         # p_z - p_ref,z [m], signed
     "vel_err",       # |v - v_ref| [m/s]
     "ang_vel_err",   # |omega - omega_ref| [rad/s]
     "tilt_deg",      # angle between body z and reference z
@@ -24,6 +25,8 @@ SIGNALS = (
     "act_rate",      # |a_t - a_{t-1}|, clamped actions
     "sat",           # share of motors at the command limit (|a| >= 1)
     "thrust_ratio",  # min over the 4 bottom rotors: thrust in wake / still air
+    "thrust_loss",   # mean over the 4 bottom rotors of 1 - thrust ratio
+    "collective",    # commanded sum w^2 / (4 w_hover^2), clamped action
     "dz",            # top - bottom height [m]
     "dxy",           # horizontal distance between the drones [m]
     "reward",
@@ -39,6 +42,8 @@ class Recording:
     crashed: torch.Tensor              # (N,) bool
     reasons: dict[str, torch.Tensor]   # (N,) bool, crash reason at the first done
     dt: float
+    collision_radii: tuple[float, float]   # (r_xy, r_z) of the collision ellipsoid [m]
+    cache: dict = field(default_factory=dict, repr=False)   # derived results (metrics)
 
 
 @torch.no_grad()
@@ -54,6 +59,7 @@ def rollout(env: ProxQuadEnv, ctrl: Controller, seed: int, steps: int | None = N
     reasons: dict[str, torch.Tensor] = {}
     kind = env.scenario.kind.clone()
     prev = obs["prev_action"].clone()
+    w_hover_sq = 4 * env.bottom.omega_hover ** 2
 
     for t in range(T):
         bot, top = env._bot_state, env._top_state
@@ -62,6 +68,7 @@ def rollout(env: ProxQuadEnv, ctrl: Controller, seed: int, steps: int | None = N
         a = ctrl.act(env, obs)
         ac = a.clamp(-1.0, 1.0)
         sig["pos_err"][t] = err["pos_err"].norm(dim=-1)
+        sig["z_err"][t] = err["pos_err"][:, 2]
         sig["vel_err"][t] = err["vel_err"].norm(dim=-1)
         sig["ang_vel_err"][t] = err["ang_vel_err"].norm(dim=-1)
         sig["tilt_deg"][t] = torch.rad2deg(torch.acos(E[:, 2, 2].clamp(-1.0, 1.0)))
@@ -69,6 +76,8 @@ def rollout(env: ProxQuadEnv, ctrl: Controller, seed: int, steps: int | None = N
         sig["act_rate"][t] = (ac - prev).norm(dim=-1)
         sig["sat"][t] = (a.abs() >= 1.0).float().mean(-1)
         sig["thrust_ratio"][t] = env._aero.thrust_ratio.min(-1).values
+        sig["thrust_loss"][t] = (1.0 - env._aero.thrust_ratio).mean(-1)
+        sig["collective"][t] = env.action_to_omega(ac).pow(2).sum(-1) / w_hover_sq
         d = top.pos - bot.pos
         sig["dz"][t], sig["dxy"][t] = d[:, 2], d[:, :2].norm(dim=-1)
         for k, v in ctrl.extras().items():
@@ -86,4 +95,5 @@ def rollout(env: ProxQuadEnv, ctrl: Controller, seed: int, steps: int | None = N
 
     cpu = lambda x: x.cpu()  # noqa: E731
     return Recording(ctrl.name, {k: cpu(v) for k, v in sig.items()}, cpu(alive_T), cpu(kind),
-                     cpu(crashed), {k: cpu(v) for k, v in reasons.items()}, env.dt)
+                     cpu(crashed), {k: cpu(v) for k, v in reasons.items()}, env.dt,
+                     tuple(env.cfg.termination.collision_radii))

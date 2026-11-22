@@ -21,6 +21,7 @@ from .default import (
     RobustControllerCfg,
     RotorCfg,
     ScenarioCfg,
+    ShuttleCfg,
     SimCfg,
     TerminationCfg,
     TopPathCfg,

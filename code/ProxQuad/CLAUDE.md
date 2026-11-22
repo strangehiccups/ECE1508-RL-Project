@@ -10,18 +10,22 @@ The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
 - Train: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase1 --log-dir runs/<name> [--iterations N] [--with-circles | --with-figure8] [--sanity]`
 - Train Phase 2 (φ): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase2 --phase1 runs/<phase1>/model.pt --log-dir runs/<name> [--with-circles | --with-figure8] [--iterations N]`
   (use the teacher's scenario mix; `collect_and_update` still to be written)
-- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...]`
-  writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs)
+- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...] [--no-downwash]`
+  writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs incl. `<scenario>_onset.png`)
+- Stress tests (Phase 2 checkpoint vs geometric+UDE at several filter pairs): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.stress --checkpoint runs/<phase2>/model.pt [--conditions ...] [--envs N]`
+  writes `runs/<phase2>/stress/` (stress.json, stress.csv)
 - Video: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.view_episode --checkpoint runs/<name>/model.pt --scenario <s> --video out.mp4`
   (the live viewer without `--video` opens a window: give the user the command, don't leave it running)
 - TensorBoard: `uv run tensorboard --logdir runs/<name>`
 
 Scenarios (`envs/scenarios.py`, in `SCENARIOS` order): hover_over, pass_over,
-approach_hover_leave, far, circle_same, circle_opposite, figure8_same, figure8_opposite.
-The default training mix uses the first 4; `--with-circles` adds the circles and
-`--with-figure8` adds circles and figure-8s (mixes in `scripts/train_phase1.py`). Evaluation
-and `view_episode --scenario` cover all 8. Results below that list 6 scenarios predate the
-figure-8s; re-evaluating a checkpoint adds them (unseen).
+approach_hover_leave, far, circle_same, circle_opposite, figure8_same, figure8_opposite,
+shuttle_under. The default training mix uses the first 4; `--with-circles` adds the circles
+and `--with-figure8` adds circles and figure-8s (mixes in `scripts/train_phase1.py`);
+shuttle_under is in no mix. Evaluation and `view_episode --scenario` cover all 9. Results
+below that list 6 or 8 scenarios predate the figure-8s / the shuttle; re-evaluating a
+checkpoint adds them (unseen). Adding the shuttle (2026-11-22) changed the random draws
+per episode, so seed-0 episodes from then on differ from those in earlier tables.
 
 ## Results log
 
@@ -337,6 +341,85 @@ Survival % (position RMS cm):
   (episodes not compared one by one).
 - Videos (`runs/videos/`, 15 s, one episode, seed 0): `RMA_circles_same/opposite.mp4`
   (this model), `robust_geometric_circles_same/opposite.mp4` (geometric+UDE).
+
+### 2026-11-22 · evaluation cost vs env count
+
+phase2_circles_3000 (π on ẑ) and geometric+UDE, one 15 s rollout each, all 8 scenarios:
+512 envs 51 / 57 s, 1024 51 / 56 s, 2048 55 / 57 s, 4096 65 / 59 s. The loop is bound by
+the 3750 sequential steps (kernel launches), not by the env count, so fewer envs save
+almost nothing. Per-episode SD of the paired difference (UDE − π) in position RMS:
+0.12 (far) to 1.39 cm (hover_over); the mean differences are 0.3–0.65 cm, so ~60 episodes
+per scenario resolve means, but crash rates of 0.5–1 % need the large counts (2048 envs:
+1 episode = 0.05 %). Stress default stays 2048.
+
+### 2026-11-22 · new metrics and the shuttle scenario, phase2_circles_3000 (`eval_metrics`)
+
+`evaluate --phase 2`, 4096 envs, all 9 scenarios (~455 episodes each), seed 0 (new episode
+draws, see above). Output `runs/phase2_circles_3000/eval_metrics/`; shuttle without
+downwash `eval_shuttle_nodw/`. Position RMS cm (crashes 0 everywhere); encounter metrics
+over all scenarios: onset / exit peak = p95 over encounters of the max error within 1 s
+after the wake's onset / exit; lead = collective's 50 %-rise time before the thrust
+loss's (negative: after):
+
+| scenario | π on ẑ | z=true | geometric+UDE |
+|---|---|---|---|
+| hover_over | 1.78 | 1.76 | 2.44 |
+| pass_over | 0.77 | 0.76 | 1.25 |
+| approach_hover_leave | 1.37 | 1.34 | 1.92 |
+| far | 0.25 | 0.21 | 0.14 |
+| circle_same | 2.18 | 2.10 | 2.56 |
+| circle_opposite | 1.21 | 1.15 | 1.76 |
+| figure8_same (unseen) | 2.29 | 2.20 | 2.75 |
+| figure8_opposite (unseen) | 1.23 | 1.01 | 1.62 |
+| shuttle_under (unseen) | 1.71 | 1.32 | 2.30 |
+| shuttle_under, no downwash | 1.37 | 0.86 | 1.11 |
+| all | 1.42 | 1.32 | 1.86 |
+| onset peak p95 [cm] | 3.9 | 4.3 | 6.2 |
+| exit peak p95 [cm] | 3.7 | 3.3 | 5.0 |
+| recovery [s] | 0.75 | 0.29 | 1.36 |
+| lead [ms] | −24 | −20 | −80 |
+| margin p5 | 0.59 | 0.59 | 0.62 |
+
+Findings:
+- The shuttle separates the controllers most: the wake costs the UDE +1.19 cm (1.11 →
+  2.30) against +0.46 for π on the true z (0.86 → 1.32). π on ẑ without downwash (1.37)
+  is not a clean control: φ never saw a drone overhead without a wake.
+- Onset-aligned averages (`shuttle_under_onset.png`): the UDE's collective rises ~60 ms
+  later than π's and it sags 3 cm on average; π holds z within 0.3 cm. π does not
+  anticipate (its collective also follows the loss, by ~20 ms) but responds faster: the
+  "acts before the sag" hypothesis is not supported, "reacts faster" is.
+- Leads are unreliable where onsets are rare (hover_over +352 ms, circle_same: the wake is
+  present from the start, onsets come only from sway); trust pass_over, approach, the
+  opposite-direction paths and the shuttle.
+- margin p5 hardly separates the controllers (the UDE sags away from the top drone, which
+  increases its margin): geometry dominates.
+
+### 2026-11-22 · stress tests, phase2_circles_3000 (`runs/phase2_circles_3000/stress/`)
+
+`stress.py`, 2048 envs, all 9 scenarios, seed 0; UDE at T = 0.03/0.02,
+0.05/0.03, 0.1/0.05, 0.2/0.1 s, "UDE best" = lowest position RMS per condition (T in
+brackets). Survival % (position RMS cm, p95); onset peak p95 over encounters [cm]:
+
+| condition | π on ẑ | z=true | UDE best | onset p95 π / UDE best |
+|---|---|---|---|---|
+| nominal | 100 (1.43, 3.05) | 100 (1.33, 3.00) | 100 (1.59, 3.43) (0.05/0.03) | 4.0 / 4.5 |
+| randomization ×2 | 99.95 (3.06, 6.78) | 100 (2.17, 5.25) | 100 (2.47, 7.18) (0.03/0.02) | 8.1 / 10.0 |
+| wake gain 2.5–3 | 100 (2.59, 5.86) | 100 (2.64, 6.19) | 100 (6.12, 23.0) (0.03/0.02) | 6.6 / 17.5 |
+| gap 0.38–0.45 m | 99.07 (1.57, 3.64) | 99.02 (1.49, 3.72) | 99.32 (1.89, 4.29) (0.03/0.02) | 4.5 / 5.2 |
+| combined | 100 (3.28, 7.63) | 99.90 (2.97, 7.30) | 99.85 (7.70, 29.8) (0.03/0.02) | 8.1 / 23.9 |
+
+Shuttle only (position RMS cm, π on ẑ / z=true / UDE best): nominal 1.71 / 1.34 / 1.99,
+×2 3.30 / 2.11 / 2.62, wake gain 2.52 / 2.37 / 4.93, gap 1.80 / 1.41 / 2.06, combined
+3.12 / 2.55 / 5.79.
+
+Findings:
+- The best UDE filter is the fastest (0.03/0.02) in every stressed condition; even so it
+  trails π in all but randomization ×2 (2.47 against 3.06 cm, where π on the true z gets
+  2.17: φ's identification extrapolates worst there, as before).
+- Strong wakes separate them most: wake gain 2.5–3 2.4× the error (p95 3.9×), combined
+  2.3× (p95 3.9×; onset peak p95 8.1 against 23.9 cm). Survival stays ≥ 99 % for all.
+- The gap condition is collision-limited for every controller (margin p5 0.07–0.11,
+  ~1 % lost).
 
 Next candidates: a yaw term in the reward (if yaw matters on hardware), the reset-time
 thrust-ratio dip in the aero model, an integral term for the geometric baseline, and more

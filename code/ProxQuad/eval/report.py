@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 
 from ..envs.scenarios import SCENARIOS
-from .metrics import WAKE_BINS, per_env
+from .metrics import WAKE_BINS, onset_average, per_env
 from .rollout import Recording
 
 COLUMNS = (   # header, summary key, format
@@ -22,6 +22,7 @@ COLUMNS = (   # header, summary key, format
     ("velRMS", "vel_rms_mean", "6.3f"),
     ("|da|", "act_rate_mean", "7.4f"),
     ("sat%", "sat_pct_mean", "5.2f"),
+    ("margin5", "margin_min_p5", "7.2f"),
 )
 PANELS = (    # signal, scale, y label
     ("pos_err", 100.0, "pos err [cm]"),
@@ -33,7 +34,10 @@ PANELS = (    # signal, scale, y label
 
 def print_summary(results: dict[str, dict]) -> None:
     """results: controller name -> summarize() output. Errors in cm and degrees (RMS over
-    each episode, then mean / p95 over episodes); posMax95 = p95 of each episode's max."""
+    each episode, then mean / p95 over episodes); posMax95 = p95 of each episode's max;
+    margin5 = p5 over episodes of the closest approach to the collision ellipsoid (0 =
+    contact, in ellipsoid radii). Encounter line: onset / exit peak error mean and p95,
+    recovery time (share recovered), lead of the collective over the thrust loss."""
     names = list(results)
     first = results[names[0]]
     w = max(len(n) for n in names) + 2
@@ -45,6 +49,13 @@ def print_summary(results: dict[str, dict]) -> None:
             print(f"  {n:<{w}s}" + " ".join(format(d[k], f) for _, k, f in COLUMNS))
             if "z_mse_mean" in d:
                 print(f"  {'':<{w}s}||z_hat - z||^2 {d['z_mse_mean']:.2f}")
+            if d.get("enc_count", 0) > 0:
+                print(f"  {'':<{w}s}{d['enc_count']} encounters: onset peak "
+                      f"{d['enc_onset_peak_cm_mean']:.2f} / {d['enc_onset_peak_cm_p95']:.2f} cm, "
+                      f"exit peak {d['enc_exit_peak_cm_mean']:.2f} / "
+                      f"{d['enc_exit_peak_cm_p95']:.2f} cm, recover "
+                      f"{d['enc_recover_s_mean']:.2f} s ({d['enc_recovered_pct']:.0f} %), "
+                      f"lead {d['onset_lead_ms']:+.0f} ms")
             why = [f"{k[6:-4]} {v:.1f}%" for k, v in d.items()
                    if k.startswith("crash_") and k != "crash_pct" and v > 0]
             if why:
@@ -86,8 +97,9 @@ def _masked(rec: Recording, key: str, envs, stride: int) -> torch.Tensor:
 def save_plots(recs: list[Recording], scenarios, out: Path, stride: int = 5,
                settle_s: float = 2.0) -> None:
     """Per scenario: <s>_timeseries.png (mean and 10-90 % band over episodes, per
-    controller) and <s>_examples.png (the median and worst episode by the first
-    controller's position RMS, all controllers on that same episode)."""
+    controller), <s>_examples.png (the median and worst episode by the first
+    controller's position RMS, all controllers on that same episode) and <s>_onset.png
+    (thrust loss, collective command and z error averaged over wake onsets)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -137,4 +149,24 @@ def save_plots(recs: list[Recording], scenarios, out: Path, stride: int = 5,
         axes[0, 0].legend(loc="upper right")
         fig.tight_layout()
         fig.savefig(out / f"{g}_examples.png", dpi=110)
+        plt.close(fig)
+
+        avgs = [(rec, c, onset_average(rec, envs, settle_s)) for rec, c in zip(recs, colors)]
+        if all(a is None for _, _, a in avgs):
+            continue
+        fig, axes = plt.subplots(3, 1, sharex=True, figsize=(8, 7))
+        for rec, c, a in avgs:
+            if a is None:
+                continue
+            for ax, key in zip(axes, ("thrust_loss", "collective", "z_err")):
+                ax.plot(a["t"], a[key], c, lw=1.2, label=f"{rec.name} ({a['count']})")
+        for ax, label in zip(axes, ("mean rotor thrust loss", "collective cmd / hover",
+                                    "z err [cm]")):
+            ax.axvline(0.0, color="0.5", lw=0.8, ls=":")
+            ax.set_ylabel(label)
+        axes[0].legend(loc="upper left")
+        axes[0].set_title(f"{g}: mean over wake onsets")
+        axes[-1].set_xlabel("t from onset [s]")
+        fig.tight_layout()
+        fig.savefig(out / f"{g}_onset.png", dpi=110)
         plt.close(fig)

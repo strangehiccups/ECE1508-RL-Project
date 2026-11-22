@@ -46,7 +46,8 @@ ProxQuad/
 ├── algos/                   phase1.py + storage.py (PPO), phase2.py (stub)
 ├── eval/                    controllers, seeded rollouts, metrics, report (any phase)
 ├── utils/                   rotation math, running normalizer
-└── scripts/                 smoke_test, inspect_downwash, view_episode, train_phase1/2, evaluate
+└── scripts/                 smoke_test, inspect_downwash, view_episode, train_phase1/2, evaluate,
+                             stress
 ```
 
 Run from `code/`: `python -m ProxQuad.scripts.smoke_test`, `python -m ProxQuad.scripts.inspect_downwash`.
@@ -144,6 +145,31 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   (π every step; φ every `adaptation_decimation` = 2 steps and at each episode's first
   step, ẑ held in between) and records ‖ẑ − μ(e_t)‖² per step; on the same episodes the
   same π flies with the true z ("z=true", RMA's Expert), plus z=0 / z=mean with `--ablate-z`.
+- Evaluation metrics, added 2026-11-22 (`eval/metrics.py`, `ENC`). Episode RMS dilutes
+  short wake encounters, so per encounter as well: an encounter is a span where the mean
+  rotor thrust loss exceeds 2 % (gaps < 0.2 s merged) that reaches 5 %; onset = first step
+  above 5 %, onsets before the 2 s settle time skipped. Metrics: onset peak (max position
+  error over 1 s from the onset), exit peak (1 s after the wake leaves), recovery time (from
+  the wake leaving until the error stays below 1 cm for 0.25 s; share recovered reported),
+  and the lead of the collective command over the thrust loss: both averaged over the
+  onsets (−0.5 to +1 s, `<scenario>_onset.png`), lead = difference of their 50 %-rise
+  times (> 0: the command rises first; tests whether π acts before the sag). Plus the
+  closest approach to the collision ellipsoid per episode, `margin_min` = √((dxy/r_xy)² +
+  (dz/r_z)²) − 1 (0 = contact), reported as p5 over episodes.
+- Stress tests (2026-11-22, `scripts/stress.py`, replaces the scratchpad OOD scripts):
+  named conditions × controllers on paired episodes for a Phase 2 checkpoint: π on ẑ, π on
+  the true z, geometric+UDE at several filter pairs (best one reported per condition).
+  Conditions: nominal, randomization ×2, wake gain 2.5–3, gap 0.38–0.45 m, combined (gap
+  0.5–0.8 m, wake gain 2–3, randomization ×1.5).
+- Shuttle scenario (2026-11-22, `ShuttleCfg`): `shuttle_under`, the top drone holds dz
+  above a horizontal line through the target (offset ±0.3 m along, 0–0.4 m across, usual
+  sway); the bottom drone flies a sin(θ₀ + ωt) along it, a ∈ 1.5–2.5 m, peak speed
+  1.0–2.0 m/s at the crossing (peak acc ≤ 2.7 m/s², ~15°; 2–6 crossings per episode).
+  The wake is steady, so the instantaneous wake model holds, but the encounters are
+  sharp: ~0.75–1 s through the wake and ~0.2–0.35 s across a single rotor's jet edge,
+  where the UDE's first-order filter cancels the least. Not in any training mix
+  (evaluated unseen); run with `--no-downwash` too, so the wake's cost per controller is
+  separated from tracking a faster path. Appended to `SCENARIOS` (indices unchanged).
 - Downwash: analytic model.
 - Rotor model (2026-11-20): **BEMT** (option B), not the linear efficiency law (option A,
   its linearization at hover). Same cost; BEMT gets the larger loss in a strong wake
