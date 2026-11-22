@@ -8,7 +8,7 @@ stress.csv. Results are written after every condition.
 
 Run from code/:
     python -m ProxQuad.scripts.stress --checkpoint runs/phase2_circles_3000/model.pt
-    python -m ProxQuad.scripts.stress --checkpoint ... --conditions nominal combined
+    python -m ProxQuad.scripts.stress --checkpoint ... --conditions nominal latency noise_x2
 """
 
 import argparse
@@ -45,6 +45,10 @@ def gap(cfg: EnvCfg, lo: float, hi: float) -> None:
                                        0.99 * lo / cfg.termination.collision_radii[1])
 
 
+def sensors(cfg: EnvCfg, scale: float) -> None:
+    cfg.sensors.enabled, cfg.sensors.noise_scale = True, scale
+
+
 def combined(cfg: EnvCfg) -> None:
     gap(cfg, 0.5, 0.8)
     cfg.aero.wake.speed_gain = (2.0, 3.0)
@@ -57,6 +61,10 @@ CONDITIONS = {
     "wake_gain_2.5-3": lambda c: setattr(c.aero.wake, "speed_gain", (2.5, 3.0)),
     "gap_0.38-0.45": lambda c: gap(c, 0.38, 0.45),
     "combined": combined,          # gap 0.5-0.8 m, wake gain 2-3, randomization x1.5
+    "latency": lambda c: sensors(c, 0.0),
+    "noise_x1": lambda c: sensors(c, 1.0),
+    "noise_x2": lambda c: sensors(c, 2.0),
+    "noise_x5": lambda c: sensors(c, 5.0),
 }
 
 

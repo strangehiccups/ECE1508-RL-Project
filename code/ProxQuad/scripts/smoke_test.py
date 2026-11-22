@@ -6,7 +6,9 @@ The env has no base controller, so this script flies the bottom drone with a sta
 policy: the same geometric controller the top drone uses (nominal model, no knowledge
 of the randomization or the downwash), converted to actions. It reports observation
 layouts and shapes, throughput, per-scenario tracking of both drones with downwash on vs
-off, crash reasons, and a check that mass randomization reaches MuJoCo.
+off, crash reasons, a check that mass randomization reaches MuJoCo, a check of the
+sensor model (delay exact, noise std as configured), and a check of the wake transport
+delay (the peak thrust loss of a pass arrives later by the modelled delay).
 """
 
 import argparse
@@ -14,7 +16,7 @@ import time
 
 import torch
 
-from ..configs import EnvCfg, ObsCfg, SimCfg
+from ..configs import EnvCfg, ObsCfg, SensorCfg, SimCfg
 from ..envs import ProxQuadEnv
 from ..envs.controller import GeometricController
 from ..envs.observations import PROPRIO_LAYOUT, TOP_LAYOUT, TRACKING_LAYOUT, describe
@@ -132,6 +134,83 @@ def com_check(env: ProxQuadEnv) -> None:
           f"(expect ~ +1 and << {1000 * env.cfg.randomization.com_offset[0]:.0f} mm)")
 
 
+def sensor_check(num_envs: int = 512) -> None:
+    """Noise off, delay 3: the measured state equals the true state 3 steps earlier.
+    Noise on, delay 0: std of measured - true per axis, against SensorCfg."""
+    cfg = EnvCfg(sim=SimCfg(num_envs=num_envs, stagger_first_episode=False),
+                 sensors=SensorCfg(enabled=True, noise_scale=0.0, bottom_delay_steps=(3, 3),
+                                   top_delay_steps=(3, 3)))
+    env = ProxQuadEnv(cfg)
+    hover = torch.full((env.n, 4), env.a_hover, device=env.dev)
+    true = []
+    worst = 0.0
+    for k in range(12):
+        true.append((env._bot_state.pos.clone(), env._top_state.omega.clone()))
+        if k >= 3:
+            bp, tw = true[k - 3]
+            worst = max(worst, (env.measured_state("bottom").pos - bp).abs().max().item(),
+                        (env.measured_state("top").omega - tw).abs().max().item())
+        env.step(hover)
+    print(f"   sensor delay check (3 steps, no noise): max |measured - true(t - 3)| = "
+          f"{worst:.1e}  (expect 0)")
+    del env
+
+    cfg.sensors = SensorCfg(enabled=True, bottom_delay_steps=(0, 0), top_delay_steps=(0, 0))
+    env = ProxQuadEnv(cfg)
+    d = {"pos": [], "vel": [], "att": [], "omega": []}
+    for _ in range(20):
+        for which, true_s in (("bottom", env._bot_state), ("top", env._top_state)):
+            m = env.measured_state(which)
+            d["pos"].append(m.pos - true_s.pos)
+            d["vel"].append(m.vel - true_s.vel)
+            E = true_s.R.transpose(1, 2) @ m.R                     # small rotation, body
+            d["att"].append(torch.rad2deg(torch.stack([E[:, 2, 1], E[:, 0, 2], E[:, 1, 0]], -1)))
+            d["omega"].append(m.omega - true_s.omega)
+        env.step(hover)
+    want = {"pos": cfg.sensors.pos_std, "vel": cfg.sensors.vel_std,
+            "att": cfg.sensors.att_std_deg, "omega": cfg.sensors.ang_vel_std}
+    for k, v in d.items():
+        got = torch.cat(v).std(0).tolist()
+        print(f"   sensor noise {k:5s}: std {[f'{x:.4g}' for x in got]}  "
+              f"(SensorCfg {[f'{x:.4g}' for x in want[k]]})")
+
+
+def delay_check(num_envs: int = 512, seconds: float = 10.0) -> None:
+    """pass_over with the transport delay on (s_tau = 1) and off, same episodes, no
+    turbulence: per env, the shift of the peak mean rotor thrust loss against the delay
+    the model used at that peak (mean over the rotor points and jets)."""
+    peak = {}
+    for on in (False, True):
+        torch.manual_seed(0)
+        cfg = EnvCfg(sim=SimCfg(num_envs=num_envs, stagger_first_episode=False))
+        cfg.scenario.top.scenario_probs = {"pass_over": 1.0}
+        cfg.aero.transport_delay, cfg.aero.transport_delay_scale = on, (1.0, 1.0)
+        cfg.aero.turb_force_std = cfg.aero.turb_torque_std = 0.0
+        env = ProxQuadEnv(cfg)
+        ctrl = GeometricController(cfg.top_controller, env.bottom, env.dt, env.n, env.dev)
+        T = round(seconds / env.dt)
+        loss = torch.zeros(T, env.n, device=env.dev)
+        delay = torch.zeros(T, env.n, device=env.dev)
+        for t in range(T):
+            loss[t] = (1.0 - env._aero.thrust_ratio).mean(-1)
+            if on:
+                delay[t] = env.aero.transport.steps[:, :4].float().mean((1, 2)) * env.dt
+            ref = env.scenario.bottom_reference(env.steps.float() * env.dt)
+            env.step(env.omega_to_action(ctrl(env._bot_state, ref)))
+        i = loss.argmax(0)
+        peak[on] = (i.float() * env.dt, loss.max(0).values, delay[i, torch.arange(env.n)])
+        del env
+    ok = (peak[False][1] > 0.05) & (peak[True][1] > 0.05)
+    shift = (peak[True][0] - peak[False][0])[ok]
+    model = peak[True][2][ok]
+    print(f"   transport delay check (pass_over, {int(ok.sum())} envs with > 5 % peak loss): "
+          f"peak loss later by {1000 * shift.median():.0f} ms (median; p10-p90 "
+          f"{1000 * shift.quantile(0.1):.0f}-{1000 * shift.quantile(0.9):.0f}), modelled "
+          f"delay at the peak {1000 * model.median():.0f} ms (p10-p90 "
+          f"{1000 * model.quantile(0.1):.0f}-{1000 * model.quantile(0.9):.0f}); "
+          f"peak loss {peak[False][1][ok].mean():.3f} without, {peak[True][1][ok].mean():.3f} with")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--num-envs", type=int, default=4096)
@@ -140,7 +219,7 @@ def main():
 
     on = run(args.num_envs, args.seconds, aero=True, history=125)
     env = on["env"]
-    print(f"rotor lag: {env.cfg.motor.rotor_lag}")
+    print(f"rotor lag: {env.cfg.motor.rotor_lag}, wake transport delay: {env.cfg.aero.transport_delay}")
     print("tracking errors x~_t (pi):\n" + describe(TRACKING_LAYOUT))
     print("true state x_t (bottom history):\n" + describe(PROPRIO_LAYOUT))
     print("privileged e_t:\n" + describe(env.priv_layout))
@@ -159,6 +238,13 @@ def main():
 
     off = run(args.num_envs, args.seconds, aero=False, history=0)
     report("downwash OFF, bottom flown by the geometric controller", off)
+    del off
+
+    print("\n== sensor model")
+    sensor_check()
+
+    print("\n== wake transport delay")
+    delay_check()
 
 
 if __name__ == "__main__":

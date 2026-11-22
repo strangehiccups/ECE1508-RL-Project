@@ -10,6 +10,7 @@ from ..drone import DroneParams, DroneState
 from .base import AeroOutput, RotorModel, WakeModel
 from .rotor import BEMTRotor, EfficiencyRotor
 from .surrogate import LearnedWake
+from .transport import WakeTransport
 from .wake import GaussianJetWake
 
 WAKE_MODELS = {"gaussian_jet": GaussianJetWake, "learned": LearnedWake}
@@ -22,18 +23,20 @@ class DownwashModel:
     Evaluated once per control step, before the policy acts, so the privileged vector
     e_t describes the disturbance over the next interval [t, t + dt):
       1. wake velocity at the 4 bottom rotor hubs and at the bottom geometric center
+         (with the transport delay: from each jet's emission-time source, transport.py)
       2. rotor thrust ratio from the axial inflow (rotor model).
       3. airframe drag  F = 0.5 rho CdA |w| w  at the center
       4. turbulence: OU force/torque, std scaled by intensity |w_center| / v_h
     The top drone feels nothing from the bottom one.
     """
 
-    def __init__(self, cfg: AeroCfg, num_envs: int, device: torch.device):
-        if cfg.transport_delay:
-            raise NotImplementedError("wake transport delay (README, downwash fidelity)")
+    def __init__(self, cfg: AeroCfg, num_envs: int, device: torch.device, dt: float):
         self.cfg, self.n, self.dev = cfg, num_envs, device
         rho = cfg.air_density
         self.wake: WakeModel = WAKE_MODELS[cfg.wake.model](cfg.wake, rho, num_envs, device)
+        k = 1 if cfg.wake.sources == "body" else 4
+        self.transport = (WakeTransport(cfg, dt, num_envs, k, device) if cfg.transport_delay
+                          else None)
         self.rotor: RotorModel = ROTOR_MODELS[cfg.rotor.model](cfg.rotor, rho, num_envs, device)
         self.cda = torch.full((num_envs,), sum(cfg.airframe_cda) / 2, device=device)   # Drag coeffcient * area
         self.turb_f = torch.zeros(num_envs, 3, device=device)   # Turbulence force
@@ -44,16 +47,33 @@ class DownwashModel:
         self.wake.resample(ids)
         self.rotor.resample(ids)
         self.cda[ids] = uniform(self.cfg.airframe_cda, len(ids), self.dev)
+        if self.transport is not None:
+            self.transport.resample(ids)
 
     def episode_params(self) -> torch.Tensor:
-        """(N, 4) this episode's wake settings [wake gain, wake spread, rotor coefficient,
-        airframe CdA], each / its range midpoint: privileged info (e_t)."""
+        """(N, 4 or 5) this episode's wake settings [wake gain, wake spread, rotor
+        coefficient, airframe CdA (, transport delay scale)], each / its range midpoint:
+        privileged info (e_t)."""
         cda = (self.cda / (sum(self.cfg.airframe_cda) / 2))[:, None]
-        return torch.cat([self.wake.episode_params(), self.rotor.episode_params(), cda], -1)
+        parts = [self.wake.episode_params(), self.rotor.episode_params(), cda]
+        if self.transport is not None:
+            parts.append(self.transport.episode_params())
+        return torch.cat(parts, -1)
 
     def reset(self, ids: torch.Tensor) -> None:
         self.turb_f[ids] = 0.0
         self.turb_t[ids] = 0.0
+        if self.transport is not None:
+            self.transport.reset(ids)
+
+    def wake_velocity(self, points: torch.Tensor, top: DroneState, tp: DroneParams,
+                      top_thrust: torch.Tensor) -> torch.Tensor:
+        """Wake velocity (N, P, 3) at points (N, P, 3), delayed if the transport delay is
+        on (sources pushed by the last compute())."""
+        if self.transport is None:
+            return self.wake.velocity(points, top, tp, top_thrust)
+        src, d, T = self.transport.delayed_sources(points, self.wake, tp)
+        return self.wake.field(points, src, d, T, tp)
 
     def compute(self, bot: DroneState, bp: DroneParams, bot_omega: torch.Tensor,
                 top: DroneState, tp: DroneParams, top_thrust: torch.Tensor,
@@ -66,7 +86,9 @@ class DownwashModel:
         # Compute wake jets at query points
         rotors = bot.pos[:, None, :] + torch.einsum("nij,kj->nki", bot.R, bp.rotor_pos)  # Rotor inertial pos
         pts = torch.cat([rotors, bot.pos[:, None, :]], dim=1)             # Query points (N, 5, 3)
-        v = self.wake.velocity(pts, top, tp, top_thrust)                  # Wake velocities at 5 query points (N, 5, 3)
+        if self.transport is not None:
+            self.transport.push(*self.wake.sources(top, tp, top_thrust))
+        v = self.wake_velocity(pts, top, tp, top_thrust)                  # Wake velocities at 5 query points (N, 5, 3)
 
         # Compute effect of wake jets on rotors
         z_b = bot.R[:, :, 2]                                             # Bottom drone rotor axis

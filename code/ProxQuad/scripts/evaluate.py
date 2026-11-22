@@ -9,7 +9,9 @@ Run from code/:
     python -m ProxQuad.scripts.evaluate --checkpoint ... --ablate-z --scenarios hover_over far
     python -m ProxQuad.scripts.evaluate --phase 2 --checkpoint runs/phase2_circles/model.pt --ablate-z
 Phase 2: pi on z_hat from phi ("policy"), against the same pi on the true z = mu(e_t)
-("z=true"); --ablate-z adds z=0 and z=mean.
+("z=true"); --ablate-z adds z=0 and z=mean. --sensors / --noise-scale: every controller
+flies on delayed, noisy state estimates of both drones (envs/sensors.py); metrics stay on
+the true state.
 """
 
 import argparse
@@ -36,6 +38,10 @@ def parse_args():
     p.add_argument("--ablate-z", action="store_true", help="also run pi with z = 0 and z = mean z")
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the mean")
     p.add_argument("--no-downwash", action="store_true")
+    p.add_argument("--sensors", action="store_true",
+                   help="controllers see delayed, noisy states (SensorCfg defaults)")
+    p.add_argument("--noise-scale", type=float, default=None,
+                   help="SensorCfg.noise_scale (implies --sensors; 0: latency only)")
     p.add_argument("--settle-s", type=float, default=2.0,
                    help="tracking metrics skip the first seconds (start-state transient)")
     p.add_argument("--out", help="output dir (default: <checkpoint dir>/eval)")
@@ -50,6 +56,9 @@ def main() -> None:
     cfg.sim.stagger_first_episode = False
     cfg.scenario.top.scenario_probs = {s: 1.0 / len(args.scenarios) for s in args.scenarios}
     cfg.aero.enabled = not args.no_downwash
+    cfg.sensors.enabled = args.sensors or args.noise_scale is not None
+    if args.noise_scale is not None:
+        cfg.sensors.noise_scale = args.noise_scale
     if args.phase == 2:   # phi's history lengths
         obs2 = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["cfg"].env.obs
         cfg.obs.bottom_history_len, cfg.obs.top_history_len = (obs2.bottom_history_len,

@@ -16,9 +16,10 @@ x_t is the bottom drone's true state (v, R, ω; `obs["proprio"]`), stored in φ'
 x̃_t is its tracking error against the flat reference (`obs["tracking_err"]`), π's input.
 π sees both drones: (x̃_t, a_{t-1}) of the bottom drone and
 o_t^top, the top drone's current state + previous command. o_t^top is measured at
-deployment (anticipation, collision avoidance), so it is not privileged. e_t (24 dims; 29
-with rotor lag) holds what cannot be measured: the bottom drone's parameters, the wake's
-settings and the downwash over the next step. φ reads both drones' histories: the top one
+deployment (anticipation, collision avoidance), so it is not privileged. e_t (30 dims by
+default: 24, + 5 with the rotor lag, + 1 with the wake transport delay) holds what cannot
+be measured: the bottom drone's parameters, the wake's settings and the downwash over the
+next step. φ reads both drones' histories: the top one
 lets it tell "heavy" from "in the wake" and predict the downwash.
 
 **Status:** environment built and smoke-tested; networks μ, π, critic, φ implemented
@@ -41,13 +42,14 @@ ProxQuad/
 │   ├── observations.py      layouts of x_t, x̃_t, e_t, top obs (the spec)
 │   ├── rewards.py           reward terms + terminations
 │   ├── history.py           Phase 2 history buffers
+│   ├── sensors.py           state estimates the controller sees: delay + white noise (off by default)
 │   └── aero/                downwash: wake model + rotor model + drag + turbulence
 ├── models/                  μ, π (+ optional spectral norm) + critic, φ
 ├── algos/                   phase1.py + storage.py (PPO), phase2.py (stub)
 ├── eval/                    controllers, seeded rollouts, metrics, report (any phase)
 ├── utils/                   rotation math, running normalizer
 └── scripts/                 smoke_test, inspect_downwash, view_episode, train_phase1/2, evaluate,
-                             stress
+                             stress, measure_sensor_noise
 ```
 
 Run from `code/`: `python -m ProxQuad.scripts.smoke_test`, `python -m ProxQuad.scripts.inspect_downwash`.
@@ -62,9 +64,11 @@ policy with `--checkpoint runs/<name>/model.pt`. Evaluate a checkpoint on all sc
 Confirmed 2026-11-18 (simulation first; hardware questions deferred):
 - MuJoCo-Warp on GPU (same stack as `code/quad`).
 - Both drones are the FSC X650 from `fsc_PegasusSimulator` branch `dev_CCM`.
-- Motors: plain thrust curve, **no rotor delay** for now. The dev_CCM rotor-lag model is
-  implemented behind `MotorCfg.rotor_lag` (off); turning it on also adds rotor speeds and
-  λ to e_t, since the lag makes (x_t, a_{t-1}) non-Markov.
+- Motors: the dev_CCM rotor lag is **on** since 2026-11-22 (`MotorCfg.rotor_lag`, was off:
+  plain thrust curve). It adds rotor speeds and λ to e_t, since the lag makes
+  (x_t, a_{t-1}) non-Markov. Both drones lag (the top drone's k_R = 20 was chosen for it).
+  Checkpoints trained before 2026-11-22 (24-dim e_t: no rotor lag, no transport delay) do
+  not run on this branch; they stay on `dev_enoch`, where both are off.
 - Rates (2026-11-19, was 100 Hz / 10 Hz as in RMA): policy **250 Hz** (2 × 2 ms physics),
   adaptation module **125 Hz** (every 2 policy steps; 100 Hz is not a whole number of
   4 ms steps) with the policy reusing the latest ẑ in between, histories 0.5 s = 125
@@ -134,7 +138,10 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   to 0 at episode start. T = 0.1 s (force) / 0.05 s (torque), confirmed 2026-11-22 (0.05 / 0.03 s tracked
   better without sensor noise; kept slower with hardware noise in mind). Rationale: a
   non-learned disturbance estimator is the fair counterpart of the adaptation module (the
-  plain controller, 17–36 cm, only showed the cost of not estimating at all).
+  plain controller, 17–36 cm, only showed the cost of not estimating at all). It stays
+  **unaware** of the rotor lag, the wake transport delay and the sensor latency (user,
+  2026-11-22): u comes from the commanded rotor speeds, no delay compensation, gains
+  unchanged. Under 24 ms of sensor latency it is itself unstable in this sim (stress tests).
 - Evaluation (2026-11-21, `eval/` + `scripts/evaluate.py`): every controller (policy,
   geometric baseline, z ablations; Phase 2's φ policy later) flies the same seeded episodes,
   one per env. Metrics per scenario: crashes, return, position / velocity / rate RMS,
@@ -156,11 +163,38 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   times (> 0: the command rises first; tests whether π acts before the sag). Plus the
   closest approach to the collision ellipsoid per episode, `margin_min` = √((dxy/r_xy)² +
   (dz/r_z)²) − 1 (0 = contact), reported as p5 over episodes.
+- Sensor model (2026-11-22, `envs/sensors.py`, `SensorCfg` = `EnvCfg.sensors`, **off** by
+  default). What the bottom drone's controller sees of both drones: the true state delayed
+  by d control steps, d uniform in {3, …, 6} (12–24 ms), drawn per episode and per drone
+  (one delay for a drone's whole state), plus white noise per axis on position, velocity,
+  attitude (a small body-frame rotation) and body rate; `noise_scale` multiplies all four.
+  π's inputs, φ's histories and the baselines (`env.measured_state`) use it; rewards,
+  terminations, e_t, evaluation metrics and the top drone's own controller keep the true
+  states (the top drone switches to its measured state for retraining, below). The noise
+  has its own generator, seeded at each full reset from `torch.initial_seed()`, so the
+  episodes do not depend on the sensor settings and every controller gets the same noise.
+  Magnitudes from 12 X650 flights of Nov 2026 (`CCM_quad/bags/plots/x650_*_2026-11-*.npz`,
+  `scripts/measure_sensor_noise.py`): the stream the controller flies on
+  (`ccm_rotor_actuation/state`: OptiTrack fused by PX4 EKF2), medians over flights:
+
+  | | measured | how |
+  |---|---|---|
+  | position | (2.9, 2.7, 1.8) mm | estimate − OptiTrack at the best lag, < 0.2 Hz removed; mostly slow: > 10 Hz < 0.1 mm |
+  | velocity | (12, 12, 10.5) mm/s | estimate − OptiTrack derivative; > 10 Hz only 2–4 mm/s |
+  | attitude | (0.15, 0.16, 0.11)° | estimate vs OptiTrack, after removing a constant tilt bias (median 2.0° roll, up to 4°) |
+  | body rate | (0.028, 0.011, 0.012) rad/s | stream content > 10 Hz, mostly 30–100 Hz vibration |
+  | latency | 12–24 ms | position / velocity: 100 Hz estimate held at 200 Hz; rates 6 ms behind the gyro, attitude 6 ms ahead of the OptiTrack arrival; state age at the command 5.8 ms (p95 10 ms) |
+
+  White noise at these levels overstates the high-frequency content of position, velocity
+  and attitude (their errors are mostly slow) and understates the body rate's vibration
+  peak: a first model. Not modelled: the constant tilt bias (about 10× the white attitude
+  noise; the ±4 % gust covers a similar tilt) and the 25–40 ms actuation dead time found in
+  the CCM_quad system identification (belongs with the rotor lag).
 - Stress tests (2026-11-22, `scripts/stress.py`, replaces the scratchpad OOD scripts):
   named conditions × controllers on paired episodes for a Phase 2 checkpoint: π on ẑ, π on
   the true z, geometric+UDE at several filter pairs (best one reported per condition).
   Conditions: nominal, randomization ×2, wake gain 2.5–3, gap 0.38–0.45 m, combined (gap
-  0.5–0.8 m, wake gain 2–3, randomization ×1.5).
+  0.5–0.8 m, wake gain 2–3, randomization ×1.5), latency only, latency + noise ×1 / ×2 / ×5.
 - Shuttle scenario (2026-11-22, `ShuttleCfg`): `shuttle_under`, the top drone holds dz
   above a horizontal line through the target (offset ±0.3 m along, 0–0.4 m across, usual
   sway); the bottom drone flies a sin(θ₀ + ωt) along it, a ∈ 1.5–2.5 m, peak speed
@@ -197,32 +231,41 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   on information it loses in Phase 2. e_t keeps the deterministic wake drag; the downwash
   tilt torque is carried by the per-rotor thrust ratios.
 
-Planned (not yet): **wake transport delay** (`AeroCfg.transport_delay`). The wake is now
-instantaneous. In the jet model w ∝ 1/s far downstream, so the travel time to distance s
+**Wake transport delay** (`AeroCfg.transport_delay`, `envs/aero/transport.py`):
+implemented and **on** since 2026-11-22 (was planned). In the jet model w ∝ 1/s far
+downstream, so the travel time to distance s
 is t(s) = s/w₀ + k s² / (2 w₀ σ₀) (w₀ ≈ 5.3 m/s at hover, σ₀ = 0.13 m): about 0.13 s at a
 0.5 m gap, 0.35 s at 1 m and 1.0 s at 2 m (0.1–1.5 s over the randomization).
 The delay is **randomized**: if the modelled timing were trusted and wrong, π (which sees
-the top drone directly) would compensate for downwash that has not arrived yet. Design:
+the top drone directly) would compensate for downwash that has not arrived yet. Design
+(as implemented):
 - Per-episode random scale τ = s_τ · t(s), s_τ ∈ `AeroCfg.transport_delay_scale`
   = [0.5, 2.0], so the policy cannot rely on one modelled delay. s_τ goes into e_t as
   `wake_delay_scale`; φ estimates it online by pairing wake emissions (top history)
   with their arrival (bottom history). Center the range on a delay measured in flight
   (top drone passes over a hovering bottom drone; time the onset of thrust loss).
-- Ring buffer of the top drone's wake-source state per control step (rotor hubs, wake
-  axis, rotor thrusts), covering the longest scaled delay: 2.0 × 1.5 s ≈ 3 s = 750 steps
-  at 250 Hz (~125 MB at 4096 envs). Filled with the initial state at reset (steady wake, as if the
-  top drone had always been there).
-- Per evaluation point (4 bottom rotors + CoM): τ from the closed form above with the
-  episode's spread / gain and s_τ, then evaluate the Gaussian jet with the top state at
-  t − τ; optionally 1–2 fixed-point passes recomputing s from that past state.
+- Ring buffer of the top drone's wake sources per control step (rotor hubs, wake axis,
+  rotor thrusts), `transport_delay_max_s` = 3 s = 751 steps (~234 MB at 4096 envs);
+  longer delays are clamped. A new episode fills it with its first state (steady wake, as
+  if the top drone had always been there).
+- Per evaluation point (4 bottom rotors + CoM) and per jet: τ from the closed form above
+  (`GaussianJetWake.travel_time`, the jet's w₀ from its thrust, the episode's spread and
+  gain) times s_τ, rounded to control steps; the jet is evaluated with its source position,
+  axis and thrust at t − τ. `transport_delay_passes` = 1 fixed-point pass recomputes s and
+  w₀ from that past source.
 - Frozen wake in the ground frame: parcels keep their emission axis and do not follow
-  the top drone after emission. (Wake skew behind a moving top drone is the other big
-  timing error; candidate for randomization too.)
-- e_t: the downwash entries become the delayed values.
-- Consequence for φ: the histories must cover the longest delay (~3 s = 750 steps at
-  250 Hz, or a downsampled window, or the GRU below); the 0.5 s RMA window is not enough.
-- Validation: thrust-ratio step response as the top drone moves over, against s_τ · t(s);
-  and the Phase 2 policy with s_τ outside the training range (e.g. 2.5): measure early
+  the top drone after emission. Jets are merged by momentum: root-sum-square speed along
+  the w²-weighted mean of their emission axes (equal to the common axis without a delay).
+  (Wake skew behind a moving top drone is the other big timing error; candidate for
+  randomization too.)
+- e_t: the downwash entries are the delayed values.
+- Consequence for φ (open, before Phase 2 retraining): the histories must cover the
+  longest delay (~3 s = 750 steps at 250 Hz, or a downsampled window, or the GRU below);
+  the 0.5 s RMA window is not enough.
+- Validation (smoke test, pass_over, s_τ = 1, delay on vs off on the same episodes): the
+  peak thrust loss arrives 464 ms later (median; p10–p90 192–848 ms) against a modelled
+  delay at the peak of 459 ms (189–848 ms); peak loss unchanged (0.169 / 0.168). Still to
+  do: the Phase 2 policy with s_τ outside the training range (e.g. 2.5): measure early
   compensation (climb before the wake arrives).
 
 Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCfg` /
@@ -327,6 +370,13 @@ Algorithm 1), `Phase2Trainer` (`algos/phase2.py`).
 - Checkpoint is self-contained: φ, μ, π and both phases' configs. Teacher by default
   `runs/phase1_circles`; `train_phase2` takes the same scenario-mix flags as Phase 1
   (train φ on the teacher's mix).
+
+Planned (not yet): **training with the sensor model** (after the evaluation-only
+stress tests). Phase 1 and Phase 2 with `SensorCfg.enabled`; then the top drone's own
+geometric controller also flies on its measured state (it uses the true state for now).
+Open: a noise curriculum (`noise_scale` ramped over the first iterations), whether the
+critic gets the true tracking errors (asymmetric), and the spectral-norm ablation under
+noise.
 
 Planned (not yet): **residual mode** (2026-11-20, deferred by the user). `ActionCfg.mode`
 = "direct" | "residual". Residual: a geometric controller on the bottom drone with

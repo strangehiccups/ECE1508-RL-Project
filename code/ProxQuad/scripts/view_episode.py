@@ -87,7 +87,7 @@ class DownwashDrawer:
                - self.h[None, :, None] * np.array([0.0, 0.0, 1.0])).reshape(-1, 3)
         pts = pts[pts[:, 2] > 0.05]
         thrust = env.top_motors.thrust(env.top_motors.omega)
-        v = env.aero.wake.velocity(torch.tensor(pts[None], dtype=torch.float32, device=env.dev),
+        v = env.aero.wake_velocity(torch.tensor(pts[None], dtype=torch.float32, device=env.dev),
                                    top, env.top, thrust)[0].cpu().numpy()
         for p, vel in zip(pts, v):
             a = min(np.linalg.norm(vel) / self.v_h, 1.0)

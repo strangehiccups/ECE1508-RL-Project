@@ -26,7 +26,8 @@ class Controller:
 
 class GeometricBaseline(Controller):
     """Lee controller on the nominal model (the top drone's gains), tracking the same
-    reference as the policy. Knows nothing of the randomization or the downwash."""
+    reference as the policy. Knows nothing of the randomization or the downwash. Flies on
+    the measured state (env.measured_state)."""
 
     def __init__(self, env: ProxQuadEnv, name: str = "geometric"):
         self.name = name
@@ -39,7 +40,7 @@ class GeometricBaseline(Controller):
     @torch.no_grad()
     def act(self, env, obs):
         ref = env.scenario.bottom_reference(env.steps.float() * env.dt)
-        return env.omega_to_action(self.ctrl(env._bot_state, ref))
+        return env.omega_to_action(self.ctrl(env.measured_state("bottom"), ref))
 
 
 class RobustGeometricBaseline(GeometricBaseline):

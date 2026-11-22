@@ -6,6 +6,9 @@ bottom drone: ego drone, flown directly by the RL policy (rotor speed commands, 
               disturbed by the top drone's downwash.
 top drone:    nominal X650 on a geometric controller, tracking a scripted scenario.
               No disturbances act on it.
+sensors:      off by default. On (SensorCfg): pi's inputs and phi's histories are built
+              from both drones' measured states (delayed + noisy); rewards, terminations,
+              e_t and the top drone's own controller keep the true states.
 
 One control step (dt = decimation x 0.002 s):
     obs_t was built from s_t and the downwash over [t, t+dt)
@@ -35,6 +38,7 @@ from .observations import (PROPRIO_LAYOUT, TOP_LAYOUT, TRACKING_LAYOUT, layout_d
 from .randomization import DomainRandomizer
 from .rewards import compute_reward, compute_terminations
 from .scenarios import Scenarios
+from .sensors import SensorModel
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
@@ -53,7 +57,7 @@ class ProxQuadEnv:
         self.n = n = cfg.sim.num_envs                        # Number of parallel environments
         
         # privileged environment factors e_t (envs/observations.py)
-        self.priv_layout = priv_layout(cfg.motor.rotor_lag)
+        self.priv_layout = priv_layout(cfg.motor.rotor_lag, cfg.aero.transport_delay)
         self.priv_dim = layout_dim(self.priv_layout)
 
         mjm = mujoco.MjModel.from_xml_path(str(ASSETS / cfg.sim.xml))  # MuJoCo model
@@ -104,13 +108,16 @@ class ProxQuadEnv:
         self.top_ctrl = GeometricController(cfg.top_controller, self.top, self.dt, n, self.dev)
         
         # Setup the downwash and drag models
-        self.aero = DownwashModel(cfg.aero, n, self.dev)
+        self.aero = DownwashModel(cfg.aero, n, self.dev, self.dt)
         self.drag = torch.tensor(cfg.drag.linear, dtype=torch.float32, device=self.dev)
         
         # State and action histories, one per drone with its own length (0 disables a buffer)
         Lb, Lt = cfg.obs.bottom_history_len, cfg.obs.top_history_len
         self.history = (TransitionHistory(n, Lb, self.bottom_hist_dim, Lt, self.top_dim,
                                           self.dev) if Lb > 0 or Lt > 0 else None)
+
+        # State estimates the bottom drone's controller sees (None: the true states)
+        self.sensors = SensorModel(cfg.sensors, n, self.dev) if cfg.sensors.enabled else None
 
         # Set up the iniial actions
         m = cfg.motor
@@ -135,7 +142,11 @@ class ProxQuadEnv:
 
     # ------------------------------------------------------------------ public API
     def reset(self, ids: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
-        """Reset envs `ids` (all if None) and return the observation dict."""
+        """Reset envs `ids` (all if None) and return the observation dict. A full reset
+        reseeds the sensor noise from torch.initial_seed() without drawing from the global
+        RNG, so episodes do not depend on the sensor settings."""
+        if ids is None and self.sensors is not None:
+            self.sensors.seed((torch.initial_seed() + 1) % 2**63)
         self._reset_idx(torch.arange(self.n, device=self.dev) if ids is None else ids)
         self._prepare()
         return self._obs
@@ -225,6 +236,11 @@ class ProxQuadEnv:
         # Return the current observation dict. 
         return self._obs
 
+    def measured_state(self, which: str) -> DroneState:
+        """State of "bottom" / "top" as the bottom drone's controller sees it at s_t (the
+        true state when sensors are off). Baseline controllers fly on this."""
+        return self._bot_meas if which == "bottom" else self._top_meas
+
     def get_history(self) -> dict[str, torch.Tensor]:
         """Phase 2 input: {"bottom": (N, L_bottom, 22), "top": (N, L_top, 22)}, oldest first; 
         only the buffers with a length > 0 in cfg.obs. Views: clone() to keep."""
@@ -287,6 +303,8 @@ class ProxQuadEnv:
         self.top_prev_action[ids] = self.top_a_hover
         if self.history is not None:
             self.history.reset(ids)
+        if self.sensors is not None:
+            self.sensors.reset(ids)
         self.randomizer.commit()
 
     def _prepare(self) -> None:
@@ -310,8 +328,11 @@ class ProxQuadEnv:
 
         self.timing["aero"] += time.perf_counter() - t0  # To time the downwash computation
         
-        # Build the observation dict
-        self._obs = self._build_obs(bot, top, self._tracking_errors(bot))
+        # Build the observation dict from the measured states
+        self._bot_meas, self._top_meas = (self.sensors.measure(bot, top) if self.sensors
+                                          else (bot, top))
+        self._obs = self._build_obs(self._bot_meas, self._top_meas,
+                                    self._tracking_errors(self._bot_meas))
 
     def _build_obs(self, bot: DroneState, top: DroneState, err: dict[str, torch.Tensor]):
         # Build the observation dict, including the proprioception, the top drone's state, and the privileged factors.
@@ -325,7 +346,7 @@ class ProxQuadEnv:
         
         # Pack privileged environment factors
         W = bp.weight_nom
-        wake = self.aero.episode_params()       # (N, 4) this episode's wake settings
+        wake = self.aero.episode_params()       # (N, 4 / 5) this episode's wake settings
         factors = {
             "mass_ratio": bp.mass_factor, "inertia_ratio": bp.inertia_factor,
             "com_offset": bp.com_offset / bp.arm,
@@ -334,6 +355,7 @@ class ProxQuadEnv:
             "gust_force": self.randomizer.gust / W,
             "wake_gain": wake[:, 0], "wake_spread": wake[:, 1],
             "rotor_wake_coeff": wake[:, 2], "airframe_cda": wake[:, 3],
+            "wake_delay_scale": wake[:, 4:],
             "rotor_speed": self.bot_motors.omega / bp.omega_hover - 1.0,
             "rotor_thrust_ratio": self._aero.thrust_ratio,
             "wake_drag": self._aero.drag / W,

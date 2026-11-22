@@ -40,13 +40,13 @@ PRIV_LAYOUT = [
     ("motor_factor", 4),        # per-rotor k_f factor
     ("rotor_lambda", 1),        # lag bandwidth / nominal 10.51            (rotor_lag only)
     ("gust_force", 3),
-    # episode constants of the wake (DownwashModel.episode_params), each / range midpoint.
-    # Planned: + wake_delay_scale once the transport delay exists (README "Planned").
+    # episode constants of the wake (DownwashModel.episode_params), each / range midpoint
     ("wake_gain", 1),           # jet speed gain k_w
     ("wake_spread", 1),         # jet spread rate k_s
     ("rotor_wake_coeff", 1),    # rotor model's random coefficient: efficiency gain
                                 # (tier A) or solidity (tier B)
     ("airframe_cda", 1),        # drag coefficient x area of the airframe in the wake
+    ("wake_delay_scale", 1),    # transport delay scale s_tau          (transport_delay only)
     # hidden actuator state: the 95 ms lag makes (x_t, a_{t-1}) non-Markov. Kept in e_t
     # (confirmed 2026-11-18); revisit x_t if the hardware reports ESC rpm. Without the
     # lag it equals the command, i.e. duplicates a_{t-1}, so it is dropped.
@@ -71,11 +71,13 @@ TOP_LAYOUT = [
 
 
 LAG_ONLY = ("rotor_lambda", "rotor_speed")
+DELAY_ONLY = ("wake_delay_scale",)
 
 
-def priv_layout(rotor_lag: bool) -> list[tuple[str, int]]:
-    """e_t layout for the current motor model (29 dims with rotor lag, 24 without)."""
-    return [(k, d) for k, d in PRIV_LAYOUT if rotor_lag or k not in LAG_ONLY]
+def priv_layout(rotor_lag: bool, transport_delay: bool) -> list[tuple[str, int]]:
+    """e_t layout: 24 dims, + 5 with rotor lag, + 1 with the wake transport delay."""
+    return [(k, d) for k, d in PRIV_LAYOUT
+            if (rotor_lag or k not in LAG_ONLY) and (transport_delay or k not in DELAY_ONLY)]
 
 
 def layout_dim(layout) -> int:

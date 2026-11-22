@@ -37,7 +37,8 @@ def build(n: int, device, sources: str, rotor: str) -> DownwashModel:
     cfg = AeroCfg()
     cfg.wake.sources, cfg.rotor.model = sources, rotor
     cfg.turb_force_std = cfg.turb_torque_std = 0.0
-    return DownwashModel(cfg, n, device)   # random params start at range midpoints
+    cfg.transport_delay = False            # steady field: the delay does not change it
+    return DownwashModel(cfg, n, device, 0.004)   # random params start at range midpoints
 
 
 def nominal(p, k: int):

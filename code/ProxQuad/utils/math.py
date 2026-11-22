@@ -13,6 +13,24 @@ def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
     ], dim=-1).reshape(*q.shape[:-1], 3, 3)
 
 
+def quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Hamilton product a * b, (..., 4) wxyz."""
+    aw, ax, ay, az = a.unbind(-1)
+    bw, bx, by, bz = b.unbind(-1)
+    return torch.stack([aw * bw - ax * bx - ay * by - az * bz,
+                        aw * bx + ax * bw + ay * bz - az * by,
+                        aw * by - ax * bz + ay * bw + az * bx,
+                        aw * bz + ax * by - ay * bx + az * bw], dim=-1)
+
+
+def quat_from_rotvec(v: torch.Tensor) -> torch.Tensor:
+    """(..., 3) rotation vector [rad] -> (..., 4) unit quaternion wxyz."""
+    angle = v.norm(dim=-1, keepdim=True)
+    half = 0.5 * angle
+    k = torch.where(angle > 1e-8, torch.sin(half) / angle.clamp_min(1e-8), 0.5 - angle**2 / 48)
+    return torch.cat([torch.cos(half), k * v], dim=-1)
+
+
 def vee(m: torch.Tensor) -> torch.Tensor:
     """(..., 3, 3) skew-symmetric matrix -> (..., 3) vector."""
     return torch.stack([m[..., 2, 1], m[..., 0, 2], m[..., 1, 0]], dim=-1)

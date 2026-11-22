@@ -40,7 +40,7 @@ class MotorCfg:
     torque kappa * f * rot_dir (kappa = rolling-moment coeff / k_f, set as actuator gear in
     the MJCF).
 
-    rotor_lag = False (confirmed 2026-11-18, for now): rotor speed = command, no delay.
+    rotor_lag = False: rotor speed = command, no delay (the default until 2026-11-22).
     rotor_lag = True: first-order lag, updated every physics step with the exact
     zero-order-hold solution (dev_CCM LaggedQuadraticThrustCurve):
         w[k+1] = w_cmd + (w[k] - w_cmd) exp(-lambda dt)
@@ -50,7 +50,7 @@ class MotorCfg:
     rolling_moment_coeff: float = 8.366e-07  # N m/(rad/s)^2 (in MJCF gear)  [dev_CCM]
     omega_idle: float = 81.8374            # rad/s at 0% throttle, armed     [dev_CCM]
     omega_max: float = 817.5911            # rad/s at 100% throttle          [dev_CCM]
-    rotor_lag: bool = False
+    rotor_lag: bool = True                 # on since 2026-11-22 (was off)
     rotor_lambda: float = 10.51            # 1/s, tau ~ 95 ms (lag only)      [dev_CCM]
     prop_radius: float = 0.1905            # m, 15" prop
 
@@ -229,12 +229,14 @@ class AeroCfg:
     turb_force_std: float = 0.05        # fraction of weight at intensity 1      [CONFIRM]
     turb_torque_std: float = 0.015      # fraction of weight x arm at intensity 1 [CONFIRM]
     turb_corr_time: float = 0.1         # s
-    # TODO(fidelity): delay the wake by its travel time (top-state ring buffer); design in
-    # README "Planned: wake transport delay"
-    transport_delay: bool = False
-    # planned: per-episode random scale on the travel time, so the policy cannot rely on
-    # one modelled delay; goes into e_t as wake_delay_scale           [CONFIRM range]
+    # Wake transport delay (aero/transport.py, README "Wake transport delay"): the wake at a
+    # point comes from the top drone's sources tau = s_tau * t(s) earlier (frozen wake)
+    transport_delay: bool = True
+    # per-episode random scale s_tau on the travel time, so the policy cannot rely on one
+    # modelled delay; in e_t as wake_delay_scale                      [CONFIRM range]
     transport_delay_scale: Range = (0.5, 2.0)
+    transport_delay_max_s: float = 3.0   # ring buffer length; longer delays are clamped
+    transport_delay_passes: int = 1      # fixed-point passes recomputing s from the past source
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +295,22 @@ class TerminationCfg:
 
 
 @dataclass
+class SensorCfg:
+    """State estimate seen by the bottom drone's controller (envs/sensors.py), for both
+    drones: the true state delayed by a per-episode number of control steps, plus white
+    noise per axis. Medians over X650 flights (scripts/measure_sensor_noise.py, README).
+    Rewards, terminations, e_t and eval metrics keep the true state."""
+    enabled: bool = False
+    pos_std: Vec3 = (0.0029, 0.0027, 0.0018)     # m, world
+    vel_std: Vec3 = (0.012, 0.012, 0.0105)       # m/s, world
+    att_std_deg: Vec3 = (0.15, 0.16, 0.11)       # small rotation, body axes
+    ang_vel_std: Vec3 = (0.028, 0.011, 0.012)    # rad/s, body
+    noise_scale: float = 1.0                     # multiplies all four
+    bottom_delay_steps: tuple[int, int] = (3, 6)  # uniform integer per episode, inclusive
+    top_delay_steps: tuple[int, int] = (3, 6)
+
+
+@dataclass
 class ObsCfg:
     # Phase 2 histories, one per drone, in env steps (0 disables; Phase 1 needs neither).
     # Both feed the adaptation module phi (RMA: 0.5 s = 125 steps at 250 Hz). Once the
@@ -316,6 +334,7 @@ class EnvCfg:
     reward: RewardCfg = field(default_factory=RewardCfg)
     termination: TerminationCfg = field(default_factory=TerminationCfg)
     obs: ObsCfg = field(default_factory=ObsCfg)
+    sensors: SensorCfg = field(default_factory=SensorCfg)
 
 
 # ---------------------------------------------------------------------------

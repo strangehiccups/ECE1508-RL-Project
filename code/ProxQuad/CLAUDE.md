@@ -3,6 +3,12 @@
 Design, decisions and open [CONFIRM] items: `README.md`. This file: how to run things and
 the results log. `runs/` is gitignored, so results live only on this machine and here.
 
+Branch `dev_RMA`: the hardware-realism version (rotor lag and wake transport delay on by
+default, e_t 30 dims; sensor model available). Checkpoints trained before 2026-11-22
+(24-dim e_t, e.g. `runs/phase2_circles_3000`) do not load here; they belong to `dev_enoch`,
+which keeps both off. Results below up to the stress tests were produced with those
+checkpoints.
+
 ## Running (from `code/`)
 
 The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
@@ -10,10 +16,12 @@ The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
 - Train: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase1 --log-dir runs/<name> [--iterations N] [--with-circles | --with-figure8] [--sanity]`
 - Train Phase 2 (φ): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase2 --phase1 runs/<phase1>/model.pt --log-dir runs/<name> [--with-circles | --with-figure8] [--iterations N]`
   (use the teacher's scenario mix; `collect_and_update` still to be written)
-- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...] [--no-downwash]`
+- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...] [--sensors | --noise-scale S] [--no-downwash]`
   writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs incl. `<scenario>_onset.png`)
 - Stress tests (Phase 2 checkpoint vs geometric+UDE at several filter pairs): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.stress --checkpoint runs/<phase2>/model.pt [--conditions ...] [--envs N]`
   writes `runs/<phase2>/stress/` (stress.json, stress.csv)
+- Sensor noise from flight logs: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.measure_sensor_noise ../../CCM_quad/bags/plots/x650_*_2026-11-*.npz`
+  (CPU only; source of the `SensorCfg` defaults)
 - Video: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.view_episode --checkpoint runs/<name>/model.pt --scenario <s> --video out.mp4`
   (the live viewer without `--video` opens a window: give the user the command, don't leave it running)
 - TensorBoard: `uv run tensorboard --logdir runs/<name>`
@@ -394,9 +402,52 @@ Findings:
 - margin p5 hardly separates the controllers (the UDE sags away from the top drone, which
   increases its margin): geometry dominates.
 
+### 2026-11-22 · sensor noise and latency, phase2_circles_3000 (no retraining)
+
+Sensor model with the measured magnitudes (README "Sensor model"); π was trained without
+it, the UDE keeps its nominal-model gains. 512 envs, all 9 scenarios, UDE T = 0.1 / 0.05 s.
+Survival % (position RMS cm), action rate |Δa|:
+
+| condition | π on ẑ | z=true | geometric+UDE |
+|---|---|---|---|
+| nominal (no sensors; 4096 envs) | 100 (1.42), 0.0055 | 100 (1.32) | 100 (1.86), 0.0033 |
+| noise only (×1, no delay) | 100 (1.45), 0.096 | 100 (1.35), 0.095 | 100 (1.90), 0.236 |
+| latency 1 step (4 ms) | 100 (1.35), 0.017 | 100 (1.22) | 100 (1.87), 0.007 |
+| latency 2 steps (8 ms) | 100 (1.43), 0.058 | 100 (1.25) | 100 (1.90), 0.008 |
+| latency 3 steps (12 ms) | 99.61 (2.16), 0.146 | 99.80 (2.00) | 100 (1.96), 0.010 |
+| latency 6 steps (24 ms) | 57.0 (14.6), 0.195 | 67.6 (13.3) | 93.8 (25.9), 0.245 |
+| noise ×1 + latency 3–6 (256 envs) | 87.1 (6.6), 0.200 | 89.8 (6.2) | 98.4 (9.5), 0.270 |
+
+Findings:
+- Noise alone barely changes tracking (+0.03–0.04 cm) but multiplies the action jitter:
+  ×17 for π, ×70 for the UDE (its d̂ passes velocity noise with gain m/T).
+- Latency is the cliff: π degrades from 8–12 ms and collapses at 24 ms (57 % survival);
+  the UDE holds to 12 ms and fails at 24 ms (94 %, 26 cm). The measured 12–24 ms straddles
+  both cliffs. π needs retraining with the latency (user, 2026-11-22).
+- The sim's bottom-controller gains (k_R = 20, k_ω = 4) are ~6–10× stiffer than the
+  flight-validated X650 stack (`fsc_autopilot_ros2/config/params_single_drone_direct_
+  actuation_x650.yaml`: angle P 3.25 1/s, rate P 0.045 normalized ≈ 0.6 N m s/rad), which
+  is why the baseline breaks at a latency the real drone flies with. The user keeps the
+  UDE baseline unaware of the delays.
+- Script: scratchpad `isolate.py` (conditions as in `stress.py` plus fixed delays).
+
+### 2026-11-22 · rotor lag + wake transport delay on (smoke test)
+
+`smoke_test --num-envs 4096 --seconds 6` with the new defaults (rotor lag on, transport
+delay on): e_t 30 dims. Stand-in geometric controller (plain, nominal gains): crashes
+0–0.3 % per scenario (collisions, one ground). Transport delay check (pass_over, s_τ = 1,
+on vs off): peak thrust loss 464 ms later (median), modelled delay at the peak 459 ms;
+same peak loss (0.169 / 0.168). With the rotor lag the minimum rotor thrust ratio reaches
+0 in pass_over / approach_hover_leave (was ≥ 0.16 without the lag; 0.02 % of steps below
+0.3): the lagged stand-in controller drops its slowest rotor to ~175 rad/s (p1, against
+265 without), where the BEMT rotor makes almost no thrust in a strong downwash. Caused by
+the lag, not the delay (checked all four on/off combinations). Cost at 4096 envs, idle
+GPU, hover actions: 11.35 ms per env step (no lag, no delay), 11.56 (lag), 12.49 (lag +
+delay; aero 1.12 → 1.95 ms); the ring buffer adds ~225 MB of GPU memory.
+
 ### 2026-11-22 · stress tests, phase2_circles_3000 (`runs/phase2_circles_3000/stress/`)
 
-`stress.py`, 2048 envs, all 9 scenarios, seed 0; UDE at T = 0.03/0.02,
+`stress.py`, 2048 envs, all 9 scenarios, seed 0, no sensors; UDE at T = 0.03/0.02,
 0.05/0.03, 0.1/0.05, 0.2/0.1 s, "UDE best" = lowest position RMS per condition (T in
 brackets). Survival % (position RMS cm, p95); onset peak p95 over encounters [cm]:
 
@@ -420,6 +471,7 @@ Findings:
   2.3× (p95 3.9×; onset peak p95 8.1 against 23.9 cm). Survival stays ≥ 99 % for all.
 - The gap condition is collision-limited for every controller (margin p5 0.07–0.11,
   ~1 % lost).
+- No sensor conditions here: π needs retraining with the latency first.
 
 Next candidates: a yaw term in the reward (if yaw matters on hardware), the reset-time
 thrust-ratio dip in the aero model, an integral term for the geometric baseline, and more

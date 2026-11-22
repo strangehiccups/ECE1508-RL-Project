@@ -3,7 +3,7 @@
 import torch
 
 from ...configs import WakeCfg
-from ...utils.math import uniform
+from ...utils.math import normalize, uniform
 from ..drone import DroneParams, DroneState
 from .base import WakeModel
 
@@ -20,7 +20,8 @@ class GaussianJetWake(WakeModel):
                                                       conserved, so w_c ~ 1/s far away
         w_k   = w_c * exp(-rho^2 / (2 sig^2)) * gate(s)
         w0    = k_w * sqrt(T_k / (2 rho_air A_k))     momentum-theory induced velocity
-    Sources are merged by momentum (root-sum-square of speeds) along the common axis d.
+    Sources are merged by momentum: root-sum-square of speeds, along the w^2-weighted mean
+    axis (the common axis d unless a transport delay gives each jet its emission axis).
     Random per episode: spread rate k_s and speed gain k_w.
 
     sources = "rotors": four jets at the rotor hubs, T = rotor thrust, A = one disk,
@@ -51,37 +52,54 @@ class GaussianJetWake(WakeModel):
         return torch.stack([self.gain / mid(self.cfg.speed_gain),
                             self.spread / mid(self.cfg.spread_rate)], dim=-1)
 
-    def velocity(self, points, top: DroneState, top_params: DroneParams, top_thrust):
-        cfg, tp = self.cfg, top_params
-        d = -top.R[:, :, 2]                                           #  (N, 3) Wake axis (top drone's body z-axis) 
-        if cfg.sources == "body":
-            # Assumes one jet from the top COM
-            src = top.pos[:, None, :]                                 # Top drone COM (N, 1, 3)
-            T = top_thrust.sum(-1, keepdim=True)                      # Collective thrust (N, 1)
-            area = 4 * torch.pi * tp.prop_radius**2                   # Area of four rotors (N, 1)
-            sig0 = cfg.sigma0_body * tp.arm                           # Initial wake width at the source                      
-        else:
-            # Assumes four jets from the rotor hubs
-            src = top.pos[:, None, :] + torch.einsum("nij,kj->nki", top.R, tp.rotor_pos)
-            T = top_thrust                                            # Thrust produced by each rotor (N, 4)
-            area = torch.pi * tp.prop_radius**2                       # Area of each rotor 
-            sig0 = cfg.sigma0_rotor * tp.prop_radius                  # Initial wake width at the sources
-            
-        # Initial wake speed at the source, from momentum theory: w_c^2 A = T / (2 rho), gain is randomized
-        w0 = self.gain[:, None] * torch.sqrt(T.clamp_min(0.0) / (2 * self.rho * area))
+    def sources(self, top: DroneState, top_params: DroneParams, top_thrust: torch.Tensor):
+        """The top drone's wake sources now: positions (N, K, 3), common axis d = -z_top
+        (N, 3), thrust (N, K). K = 4 rotor hubs, or 1 (the COM, total thrust)."""
+        d = -top.R[:, :, 2]
+        if self.cfg.sources == "body":
+            return top.pos[:, None, :], d, top_thrust.sum(-1, keepdim=True)
+        hubs = top.pos[:, None, :] + torch.einsum("nij,kj->nki", top.R, top_params.rotor_pos)
+        return hubs, d, top_thrust
 
-        # Solve for wake velocities at query points P = 5 (bottom body + 4 rotors)
-        r = points[:, :, None, :] - src[:, None, :, :]                # Vector from wake source to query points (N, P, K, 3)
-        s = (r * d[:, None, None, :]).sum(-1)                         # Distance downstream along wake axis d (N, P, K)
-        rho2 = ((r * r).sum(-1) - s * s).clamp_min(0.0)               # Perpendicular part of r w.r.t. wake axis
-        sig = sig0 + self.spread[:, None, None] * s.clamp_min(0.0)    # Jet width at distance s, spread is randomized
-        gate = (s / cfg.onset_ramp).clamp(0.0, 1.0)                   # Starts the jet continuously from the rotor plane
-        
-        # Speeds of jet k at query point p (centerline decay and Gaussian falloff)
-        w = w0[:, None, :] * (sig0 / sig) * torch.exp(-rho2 / (2 * sig * sig)) * gate   
-        
-        # Wake speed at each query point using sqrt(squared sum). For momentum conservation.
-        speed = torch.sqrt((w * w).sum(-1))                           # (N, P)
-        
-        # Return the wake velocity along the wake axis. 
-        return speed[..., None] * d[:, None, :]
+    def _area_sig0(self, tp: DroneParams) -> tuple[float, float]:
+        """Disk area per source and initial jet width."""
+        if self.cfg.sources == "body":
+            return 4 * torch.pi * tp.prop_radius**2, self.cfg.sigma0_body * tp.arm
+        return torch.pi * tp.prop_radius**2, self.cfg.sigma0_rotor * tp.prop_radius
+
+    def _w0(self, T: torch.Tensor, tp: DroneParams) -> torch.Tensor:
+        """Initial jet speed, momentum theory x gain. T (N, ..., K)."""
+        area, _ = self._area_sig0(tp)
+        g = self.gain.view(-1, *([1] * (T.dim() - 1)))
+        return g * torch.sqrt(T.clamp_min(0.0) / (2 * self.rho * area))
+
+    def travel_time(self, s: torch.Tensor, T: torch.Tensor, tp: DroneParams) -> torch.Tensor:
+        """Time for air to travel from the source to downstream distance s [s] along the
+        centerline, w_c = w0 sig0 / (sig0 + k_s s): t = s / w0 + k_s s^2 / (2 w0 sig0).
+        s, T (N, P, K)."""
+        _, sig0 = self._area_sig0(tp)
+        w0 = self._w0(T, tp).clamp_min(1e-3)
+        s = s.clamp_min(0.0)
+        return s / w0 + self.spread[:, None, None] * s * s / (2 * w0 * sig0)
+
+    def field(self, points, src, d, T, tp: DroneParams) -> torch.Tensor:
+        """Wake velocity (N, P, 3) at points (N, P, 3) from jets k with source src
+        (N, P, K, 3), axis d (N, P, K, 3) and thrust T (N, P, K), per point and jet
+        (size-1 dims broadcast). Jets are merged by momentum: speed = root-sum-square,
+        direction = the w^2-weighted mean axis."""
+        _, sig0 = self._area_sig0(tp)
+        w0 = self._w0(T, tp)                                        # (N, P|1, K)
+        r = points[:, :, None, :] - src                             # (N, P, K, 3)
+        s = (r * d).sum(-1)                                         # downstream distance
+        rho2 = ((r * r).sum(-1) - s * s).clamp_min(0.0)             # squared distance from the axis
+        sig = sig0 + self.spread[:, None, None] * s.clamp_min(0.0)  # jet width
+        gate = (s / self.cfg.onset_ramp).clamp(0.0, 1.0)            # starts at the rotor plane
+        w = w0 * (sig0 / sig) * torch.exp(-rho2 / (2 * sig * sig)) * gate
+        w2 = w * w
+        axis = normalize((w2[..., None] * d).sum(-2))
+        return torch.sqrt(w2.sum(-1))[..., None] * axis
+
+    def velocity(self, points, top: DroneState, top_params: DroneParams, top_thrust):
+        """Instantaneous wake (no transport delay)."""
+        src, d, T = self.sources(top, top_params, top_thrust)
+        return self.field(points, src[:, None], d[:, None, None], T[:, None], top_params)

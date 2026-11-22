@@ -50,6 +50,19 @@ class WakeModel(ABC):
                  top_thrust: torch.Tensor) -> torch.Tensor:
         """points (N, P, 3) world; top_thrust (N, 4) [N] -> wake velocity (N, P, 3)."""
 
+    # Needed for the transport delay (aero/transport.py) only
+    def sources(self, top: DroneState, top_params: DroneParams, top_thrust: torch.Tensor):
+        """(positions (N, K, 3), axis (N, 3), thrust (N, K)) of the wake sources now."""
+        raise NotImplementedError
+
+    def field(self, points, src, d, T, top_params: DroneParams) -> torch.Tensor:
+        """Wake velocity (N, P, 3) from per-point, per-jet sources (N, P, K, ...)."""
+        raise NotImplementedError
+
+    def travel_time(self, s: torch.Tensor, T: torch.Tensor, top_params: DroneParams):
+        """Travel time [s] from a source to downstream distance s, (N, P, K)."""
+        raise NotImplementedError
+
 
 class RotorModel(ABC):
     def resample(self, ids: torch.Tensor) -> None:
