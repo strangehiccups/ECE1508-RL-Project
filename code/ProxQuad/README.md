@@ -94,7 +94,8 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   reference moves. Absolute position is left out: the dynamics do not depend on it, the
   world origin is arbitrary on hardware, and the position relative to the wake is in
   the top history.
-- Top drone: geometric controller on scripted paths, no disturbances.
+- Top drone: geometric controller on scripted paths, no disturbances. Since 2026-11-22 it
+  flies on its measured state (sensor model) with the flight X650 gains (`ControllerCfg`).
 - Scenarios (2026-11-20): `envs/scenarios.py` (`Scenarios`, `ScenarioCfg`) samples both
   drones' reference paths per episode. Both paths are **absolute** (placed around the
   fixed target). Start states: the top drone on its reference at t = 0; the bottom drone
@@ -140,8 +141,15 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   non-learned disturbance estimator is the fair counterpart of the adaptation module (the
   plain controller, 17–36 cm, only showed the cost of not estimating at all). It stays
   **unaware** of the rotor lag, the wake transport delay and the sensor latency (user,
-  2026-11-22): u comes from the commanded rotor speeds, no delay compensation, gains
-  unchanged. Under 24 ms of sensor latency it is itself unstable in this sim (stress tests).
+  2026-11-22): u comes from the commanded rotor speeds, no delay compensation. The
+  zero-delay gains (k_R 20, k_ω 4) are unstable with the rotor lag and ≥ 12 ms latency
+  (linear phase margin 11° / −4° / −18° at 0 / 12 / 24 ms), so on 2026-11-22 the gains were
+  replaced by the flight X650 tune (`ControllerCfg`, conversion in its docstring; no sweep,
+  user). The full flight tune sags in the downwash (1024 episodes, sensors on: 91.1 %
+  survival, 34.1 cm); the interim baseline keeps the flight attitude gains and UDE filters
+  (T 0.5 / 0.75 s) with the earlier, stiffer sim position gains: 99.9 %, 15.4 cm (confirmed by the
+  user). The plain geometric baseline (no UDE) was removed on 2026-11-22: no longer a
+  meaningful comparison.
 - Evaluation (2026-11-21, `eval/` + `scripts/evaluate.py`): every controller (policy,
   geometric baseline, z ablations; Phase 2's φ policy later) flies the same seeded episodes,
   one per env. Metrics per scenario: crashes, return, position / velocity / rate RMS,
@@ -163,16 +171,19 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   times (> 0: the command rises first; tests whether π acts before the sag). Plus the
   closest approach to the collision ellipsoid per episode, `margin_min` = √((dxy/r_xy)² +
   (dz/r_z)²) − 1 (0 = contact), reported as p5 over episodes.
-- Sensor model (2026-11-22, `envs/sensors.py`, `SensorCfg` = `EnvCfg.sensors`, **off** by
-  default). What the bottom drone's controller sees of both drones: the true state delayed
+- Sensor model (2026-11-22, `envs/sensors.py`, `SensorCfg` = `EnvCfg.sensors`, **on** by
+  default on this branch). What the bottom drone's controller sees of both drones: the true state delayed
   by d control steps, d uniform in {3, …, 6} (12–24 ms), drawn per episode and per drone
   (one delay for a drone's whole state), plus white noise per axis on position, velocity,
   attitude (a small body-frame rotation) and body rate; `noise_scale` multiplies all four.
-  π's inputs, φ's histories and the baselines (`env.measured_state`) use it; rewards,
-  terminations, e_t, evaluation metrics and the top drone's own controller keep the true
-  states (the top drone switches to its measured state for retraining, below). The noise
-  has its own generator, seeded at each full reset from `torch.initial_seed()`, so the
-  episodes do not depend on the sensor settings and every controller gets the same noise.
+  π's inputs, φ's histories, the baselines (`env.measured_state`) and the top drone's own
+  controller use it; rewards, terminations, e_t, the critic's inputs and evaluation metrics
+  keep the true states. The bottom drone's delay is in e_t (`sensor_delay`, steps / range
+  midpoint; 0 without the sensor model). A level in [0, 1] scales the noise and the drawn
+  delays; Phase 1 ramps it linearly over `Phase1Cfg.sensor_ramp_iterations` = 500 (Phase 2
+  and evaluation: 1). The noise has its own generator, seeded at each full reset from
+  `torch.initial_seed()`, so the episodes do not depend on the sensor settings and every
+  controller gets the same noise.
   Magnitudes from 12 X650 flights of Nov 2026 (`CCM_quad/bags/plots/x650_*_2026-11-*.npz`,
   `scripts/measure_sensor_noise.py`): the stream the controller flies on
   (`ccm_rotor_actuation/state`: OptiTrack fused by PX4 EKF2), medians over flights:
@@ -308,7 +319,9 @@ Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCf
     exploration noise. `BasePolicy.lipschitz_bound()` reports |g| × the exact product of
     the layer norms (to log during training).
 - Critic: separate MLP 256 → 256, asymmetric: [x̃_t, a_{t-1}, o_t^top, e_t] with the raw
-  e_t, not μ, so the value loss does not shape z.
+  e_t, not μ, so the value loss does not shape z. x̃_t and o_t^top come from the true
+  states (`CRITIC_INPUTS`: `tracking_err_true`, `top_true`), not the measured ones.
+- z: 12 dims since 2026-11-22 (was 8 as in RMA; e_t grew to 31 dims on this branch).
 - φ: per-step 2-layer MLP embedding (32) **per drone**, the two stacked as 64 channels,
   then RMA's 3 × 1-D conv → flatten → linear. Every conv layer mixes both drones at each
   time step (telling mass from wake needs their correlation). First conv kernel / stride
@@ -331,7 +344,8 @@ Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCf
   sample at 4096 envs ≈ 1.8 ms.
 
 Phase 1 training (2026-11-20): **PPO**, own code (not SB3 / TorchRL / rsl_rl), written
-from `code/quad/train.py` and checked against rsl_rl's `ppo.py` (installed via mjlab).
+from `code/quad/train.py` and checked against rsl_rl's `ppo.py` (was installed via mjlab;
+mjlab was removed from `code/pyproject.toml` on 2026-11-22, ProxQuad does not use it).
 Synchronous on one GPU over the batched envs; distributed schemes such as Gorila (async
 DQN over many machines) do not apply: discrete actions, off-policy, built for CPU-bound
 simulators. Skeleton: `Phase1Trainer` (`algos/phase1.py`), `RolloutStorage`
@@ -371,12 +385,14 @@ Algorithm 1), `Phase2Trainer` (`algos/phase2.py`).
   `runs/phase1_circles`; `train_phase2` takes the same scenario-mix flags as Phase 1
   (train φ on the teacher's mix).
 
-Planned (not yet): **training with the sensor model** (after the evaluation-only
-stress tests). Phase 1 and Phase 2 with `SensorCfg.enabled`; then the top drone's own
-geometric controller also flies on its measured state (it uses the true state for now).
-Open: a noise curriculum (`noise_scale` ramped over the first iterations), whether the
-critic gets the true tracking errors (asymmetric), and the spectral-norm ablation under
-noise.
+**Training on this branch** (2026-11-22, user decisions): rotor lag, wake transport delay
+and the sensor model on; sensor level ramped 0 → 1 over the first 500 Phase 1 iterations;
+the bottom drone's latency in e_t (31 dims); the top drone on its measured state with the
+flight gains; the critic on true states; z 12; action-rate weight 0.05 → 0.1 (under the
+measured noise the old policy's |Δa| rose ~10×, which at 0.05 already cost as much as its
+tracking error); circles mix; Phase 1 3000 iterations; Phase 2 keeps the 0.5 s window. Not
+done: action history as a π input (user: not yet), actuation dead time (user: not needed),
+the spectral-norm ablation under noise.
 
 Planned (not yet): **residual mode** (2026-11-20, deferred by the user). `ActionCfg.mode`
 = "direct" | "residual". Residual: a geometric controller on the bottom drone with

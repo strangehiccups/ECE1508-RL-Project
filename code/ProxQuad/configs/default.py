@@ -76,21 +76,23 @@ class ControllerCfg:
     """Geometric (Lee) tracking controller -> rotor speed commands via the same
     normalize-then-saturate allocation Pegasus uses (force_and_torques_to_velocities).
 
-    Attitude gains start from the dev_CCM X650 sweep (x650_attitude_sim/simulate.py:
-    b_omega = 4, b_r = 15; that law's e_r ~ 2 x rotation error, so k_R = 2 b_r = 30).
-    That sweep ran the controller every 2 ms physics step; at 100 Hz with a 10 ms hold
-    (the control rate until 2026-11-19; now 250 Hz, 4 ms hold), k_R = 30 is marginal: it
-    flips the drone whenever the rotor lag is
-    slower than lambda ~ 10.7/s. k_R = 20 (b_r = 10) flew 0 flips over the full
-    randomized inertia x [0.8, 1.6] and lambda [8.5, 12.5] range (2048 envs x 10 s).
-    Position gains are proposed here (dev_CCM has none for X650). [CONFIRM]
+    Gains (2026-11-22): the flight-tested X650 tune of fsc_autopilot
+    (config/params_single_drone_direct_actuation_x650.yaml) converted to this form; the
+    top drone flies on its measured state (latency) with rotor lag, where the previous
+    zero-delay sim gains (kp 4/6, kd 3.5/4.5, k_R 20, k_omega 4) are unstable.
+      position, nested PD in force units / vehicle_mass 3.5 kg: kp = k_vel k_pos / m,
+        kd = k_vel / m (xy: k_pos 1, k_vel 7; z: k_pos 1, k_vel 3)
+      attitude, PX4-style cascade: k_R = rate P x angle P, k_omega = rate P, with rate P
+        in N m from the allocator's normalization (roll/pitch 1 = 18.9 N m, yaw 1 =
+        2.14 N m): roll/pitch angle P 3.25, rate P 0.045; yaw angle P 1.4, rate P 0.060.
+        The rate loop's D and I terms have no slot here.
     """
-    kp_pos: Vec3 = (4.0, 4.0, 6.0)       # 1/s^2 (acceleration per m)
-    kd_pos: Vec3 = (3.5, 3.5, 4.5)       # 1/s
+    kp_pos: Vec3 = (2.0, 2.0, 0.857)     # 1/s^2 (acceleration per m)
+    kd_pos: Vec3 = (2.0, 2.0, 0.857)     # 1/s
     ki_pos: Vec3 = (0.0, 0.0, 0.0)
     int_limit: float = 0.5
-    k_R: Vec3 = (20.0, 20.0, 20.0)       # N m/rad
-    k_omega: Vec3 = (4.0, 4.0, 4.0)      # N m s/rad                      [dev_CCM]
+    k_R: Vec3 = (2.76, 2.76, 0.18)       # N m/rad
+    k_omega: Vec3 = (0.85, 0.85, 0.128)  # N m s/rad
     max_tilt_deg: float = 30.0
 
 
@@ -99,10 +101,14 @@ class RobustControllerCfg(ControllerCfg):
     """Bottom-drone baseline: geometric controller + UDE (uncertainty and disturbance
     estimator). The UDE low-pass filters the nominal model's residual into a lumped
     force (inertial frame) and torque (body frame) estimate, subtracted from the commanded
-    force and torque. Own state and commands only, like phi. ki_pos stays 0. Filter time
-    constants confirmed 2026-11-22."""
-    ude_tau_force: float = 0.1      # s, low-pass time constant of the force estimate
-    ude_tau_torque: float = 0.05    # s, of the torque estimate
+    force and torque. Own state and commands only, like phi. ki_pos stays 0.
+    Gains (2026-11-22, confirmed by the user): attitude from the flight tune (ControllerCfg), position
+    from the earlier sim tune (the flight position loop sags in the downwash: 91 % survival,
+    34 cm), UDE filters from flight: force = 1 / ude_gain 2, torque = rate kp / ki."""
+    kp_pos: Vec3 = (4.0, 4.0, 6.0)
+    kd_pos: Vec3 = (3.5, 3.5, 4.5)
+    ude_tau_force: float = 0.5      # s, low-pass time constant of the force estimate
+    ude_tau_torque: float = 0.75    # s, of the torque estimate
     ude_force_limit: float = 0.5    # |d_F| per axis, fraction of nominal weight
     ude_torque_limit: float = 2.0   # |d_tau| per axis [N m]
 
@@ -280,7 +286,7 @@ class RewardCfg:
     att: float = 50.0         # 3 - trace(R_ref^T R), in [0, 4], per second
     ang_vel: float = 5.0      # |omega - R^T R_ref omega_ref| [rad/s], per second
     action: float = 0.0       # |a - a_hover|, per second
-    action_rate: float = 0.05  # |a - a_prev| per step (see above)
+    action_rate: float = 0.1   # |a - a_prev| per step (see above); 0.05 until 2026-11-22
     crash: float = 10.0       # one-off penalty on a crash
 
 
@@ -299,8 +305,9 @@ class SensorCfg:
     """State estimate seen by the bottom drone's controller (envs/sensors.py), for both
     drones: the true state delayed by a per-episode number of control steps, plus white
     noise per axis. Medians over X650 flights (scripts/measure_sensor_noise.py, README).
-    Rewards, terminations, e_t and eval metrics keep the true state."""
-    enabled: bool = False
+    Rewards, terminations, e_t, the critic and eval metrics keep the true state. On by
+    default on dev_RMA; training ramps the level up (Phase1Cfg.sensor_ramp_iterations)."""
+    enabled: bool = True
     pos_std: Vec3 = (0.0029, 0.0027, 0.0018)     # m, world
     vel_std: Vec3 = (0.012, 0.012, 0.0105)       # m/s, world
     att_std_deg: Vec3 = (0.15, 0.16, 0.11)       # small rotation, body axes
@@ -410,7 +417,8 @@ class PPOCfg:
 class Phase1Cfg:
     """Phase 1: jointly train env-factor encoder mu and base policy pi with PPO."""
     env: EnvCfg = field(default_factory=EnvCfg)
-    z_dim: int = 8                # mu(e_t: 24 dims) -> z_t (RMA uses 8)
+    z_dim: int = 12               # mu(e_t: 31 dims on dev_RMA) -> z_t (RMA uses 8; 12 since 2026-11-22)
+    sensor_ramp_iterations: int = 500   # sensor noise and latency ramped 0 -> 1 linearly
     policy: PolicyCfg = field(default_factory=PolicyCfg)
     critic: CriticCfg = field(default_factory=CriticCfg)
     encoder: EncoderCfg = field(default_factory=EncoderCfg)

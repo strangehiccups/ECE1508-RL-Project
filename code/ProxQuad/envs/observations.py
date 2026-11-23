@@ -47,6 +47,7 @@ PRIV_LAYOUT = [
                                 # (tier A) or solidity (tier B)
     ("airframe_cda", 1),        # drag coefficient x area of the airframe in the wake
     ("wake_delay_scale", 1),    # transport delay scale s_tau          (transport_delay only)
+    ("sensor_delay", 1),        # bottom drone's state latency [steps] / range midpoint; 0 without sensors
     # hidden actuator state: the 95 ms lag makes (x_t, a_{t-1}) non-Markov. Kept in e_t
     # (confirmed 2026-11-18); revisit x_t if the hardware reports ESC rpm. Without the
     # lag it equals the command, i.e. duplicates a_{t-1}, so it is dropped.
@@ -75,7 +76,7 @@ DELAY_ONLY = ("wake_delay_scale",)
 
 
 def priv_layout(rotor_lag: bool, transport_delay: bool) -> list[tuple[str, int]]:
-    """e_t layout: 24 dims, + 5 with rotor lag, + 1 with the wake transport delay."""
+    """e_t layout: 25 dims, + 5 with rotor lag, + 1 with the wake transport delay."""
     return [(k, d) for k, d in PRIV_LAYOUT
             if (rotor_lag or k not in LAG_ONLY) and (transport_delay or k not in DELAY_ONLY)]
 
@@ -89,6 +90,12 @@ POLICY_INPUTS = [
     ("tracking_err", layout_dim(TRACKING_LAYOUT)),
     ("prev_action", 4),
     ("top", layout_dim(TOP_LAYOUT)),
+]
+# critic (asymmetric): the same quantities from the true states, plus e_t ("priv")
+CRITIC_INPUTS = [
+    ("tracking_err_true", layout_dim(TRACKING_LAYOUT)),
+    ("prev_action", 4),
+    ("top_true", layout_dim(TOP_LAYOUT)),
 ]
 
 # Pack different parts of tensors

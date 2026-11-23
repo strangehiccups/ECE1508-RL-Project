@@ -1,10 +1,9 @@
 """Watch one ProxQuad episode in the MuJoCo viewer, or record it to MP4.
 
 The env runs on the GPU as usual (one env); its state is mirrored into a CPU MjData for
-drawing. The bottom drone is flown by the geometric controller, or with --checkpoint by a
+drawing. The bottom drone is flown by the geometric+UDE baseline, or with --checkpoint by a
 trained Phase 1 policy (deterministic, z = mu(e_t)) or a Phase 2 checkpoint (pi on z_hat
-from phi, at their own rates), or with --ude by the geometric+UDE baseline. Downwash drawing (from the env's
-wake model):
+from phi, at their own rates). Downwash drawing (from the env's wake model):
     field     arrows in the vertical plane through the top drone, facing the camera:
               wake velocity, length and brightness by speed
     inflow    cyan arrows: axial inflow through each bottom rotor; blue arrow: wake
@@ -33,7 +32,7 @@ from ..configs import EnvCfg, SimCfg
 from ..envs import ProxQuadEnv
 from ..envs.prox_quad_env import ASSETS
 from ..envs.scenarios import SCENARIOS
-from ..eval import (GeometricBaseline, Phase1Policy, Phase2Policy, RobustGeometricBaseline,
+from ..eval import (Phase1Policy, Phase2Policy, RobustGeometricBaseline,
                     load_phase1, load_phase2)
 
 FIELD_RGB = np.array([0.25, 0.6, 1.0])
@@ -52,8 +51,7 @@ def parse_args():
     p.add_argument("--size", type=int, nargs=2, default=(1280, 720), metavar=("W", "H"))
     p.add_argument("--distance", type=float, default=6.0, help="camera distance [m]")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--checkpoint", help="Phase 1 or 2 model.pt; default: geometric controller")
-    p.add_argument("--ude", action="store_true", help="without --checkpoint: geometric+UDE baseline")
+    p.add_argument("--checkpoint", help="Phase 1 or 2 model.pt; default: geometric+UDE baseline")
     return p.parse_args()
 
 
@@ -128,10 +126,8 @@ def make_env(args):
         ctrl = Phase2Policy(*load_phase2(args.checkpoint, env))
     elif args.checkpoint:
         ctrl = Phase1Policy(*load_phase1(args.checkpoint, env))
-    elif args.ude:
-        ctrl = RobustGeometricBaseline(env)
     else:
-        ctrl = GeometricBaseline(env)
+        ctrl = RobustGeometricBaseline(env)
     return env, ctrl
 
 

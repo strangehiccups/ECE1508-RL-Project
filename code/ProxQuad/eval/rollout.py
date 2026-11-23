@@ -29,6 +29,7 @@ SIGNALS = (
     "collective",    # commanded sum w^2 / (4 w_hover^2), clamped action
     "dz",            # top - bottom height [m]
     "dxy",           # horizontal distance between the drones [m]
+    "top_err",       # top drone: |p - p_ref| [m]
     "reward",
 )
 
@@ -80,6 +81,8 @@ def rollout(env: ProxQuadEnv, ctrl: Controller, seed: int, steps: int | None = N
         sig["collective"][t] = env.action_to_omega(ac).pow(2).sum(-1) / w_hover_sq
         d = top.pos - bot.pos
         sig["dz"][t], sig["dxy"][t] = d[:, 2], d[:, :2].norm(dim=-1)
+        top_ref = env.scenario.top_reference(env.steps.float() * env.dt).pos
+        sig["top_err"][t] = (top.pos - top_ref).norm(dim=-1)
         for k, v in ctrl.extras().items():
             sig.setdefault(k, torch.full((T, N), math.nan, device=dev))[t] = v
 

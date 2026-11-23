@@ -3,8 +3,8 @@
 Design, decisions and open [CONFIRM] items: `README.md`. This file: how to run things and
 the results log. `runs/` is gitignored, so results live only on this machine and here.
 
-Branch `dev_RMA`: the hardware-realism version (rotor lag and wake transport delay on by
-default, e_t 30 dims; sensor model available). Checkpoints trained before 2026-11-22
+Branch `dev_RMA`: the hardware-realism version (rotor lag, wake transport delay and the
+sensor model on by default, e_t 31 dims). Checkpoints trained before 2026-11-22
 (24-dim e_t, e.g. `runs/phase2_circles_3000`) do not load here; they belong to `dev_enoch`,
 which keeps both off. Results below up to the stress tests were produced with those
 checkpoints.
@@ -16,7 +16,7 @@ The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
 - Train: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase1 --log-dir runs/<name> [--iterations N] [--with-circles | --with-figure8] [--sanity]`
 - Train Phase 2 (φ): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.train_phase2 --phase1 runs/<phase1>/model.pt --log-dir runs/<name> [--with-circles | --with-figure8] [--iterations N]`
   (use the teacher's scenario mix; `collect_and_update` still to be written)
-- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...] [--sensors | --noise-scale S] [--no-downwash] [--plain-geometric]`
+- Evaluate: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.evaluate --checkpoint runs/<name>/model.pt [--phase 2] [--ablate-z] [--scenarios ...] [--sensors | --noise-scale S] [--no-downwash]`
   writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs incl. `<scenario>_onset.png`)
 - Stress tests (Phase 2 checkpoint vs geometric+UDE at several filter pairs): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.stress --checkpoint runs/<phase2>/model.pt [--conditions ...] [--envs N]`
   writes `runs/<phase2>/stress/` (stress.json, stress.csv)
@@ -484,7 +484,104 @@ height sag 0.28 / 0.07 / 2.95 cm for π on ẑ / true z / UDE) and batch-1 CPU l
 0.04 ms, φ 0.22 ms median on the i5-10600K, TorchScript, one thread). Numbers identical to
 the `eval_metrics` run (same code and seed).
 
+### 2026-11-22 · dev_RMA: controller gains for latency + rotor lag, Phase 1 launch
+
+Linear attitude loop (roll, J 0.0867, rotor lag 95 ms, 4 ms hold) phase margin at 0 / 12 /
+24 ms latency: zero-delay sim gains (k_R 20, k_ω 4) 11° / −4° / −18°; flight X650 gains
+converted (k_R 2.76, k_ω 0.85) 30° / 26° / 21° (worst training corner, λ 8.5, J ×0.85:
+11°). Rollouts, 1024 envs, 9 scenarios, full dev_RMA physics, top drone on its measured
+state with the flight gains (5.0–5.6 cm from its path in every run):
+
+| bottom controller | sensors | survival | position RMS (p95) | tilt / yaw RMS |
+|---|---|---|---|---|
+| geometric + UDE, full flight tune (T 0.5 / 0.75) | on | 91.11 % (7.4 % ground) | 34.1 (66.4) cm | 5.2° / 6.3° |
+| same | off | 91.89 % | 33.9 cm | 5.2° / 6.3° |
+| plain geometric, flight tune | on / off | 30.1 / 31.3 % | 139 cm | |
+| UDE, flight attitude + sim position gains, T 0.5 / 0.75 | on | 99.90 % | 15.4 (35.8) cm | 6.8° / 6.4° |
+| same, T 0.1 / 0.75 | on | 100 % | 16.0 (40.8) cm | 7.6° / 6.7° |
+
+The flight position loop (z: kp = kd = 0.86) cannot hold the bottom drone in the downwash;
+the latency barely matters for it. Interim baseline: flight attitude + sim position + flight
+UDE filters, confirmed by the user; the plain geometric baseline was removed. Scripts: scratchpad `check_flight_gains.py`,
+`check_baseline.py`.
+
+Phase 1 `runs/phase1_hifi_circles` launched 2026-11-22 (`train_phase1 --with-circles
+--iterations 3000`, log `runs/phase1_hifi_circles.log`): sensors on (ramp 500 iterations),
+e_t 31, z 12, critic on true states, action-rate 0.1. ~1.5 s per iteration (145–165 k
+steps/s). Crash rate 1.0 for the first ~30 iterations (episodes ~1 s), 0.13–0.21 by
+iteration 142 (episodes ~14 s, return ~800).
+
 Next candidates: a yaw term in the reward (if yaw matters on hardware), the reset-time
 thrust-ratio dip in the aero model, an integral term for the geometric baseline, and more
 seeds before drawing finer conclusions. Then Phase 2 (φ), with the circle model as the
 Phase 1 teacher.
+
+### 2026-11-22 · phase1_hifi_circles → phase2_hifi_circles (dev_RMA: e_t 31, z 12)
+
+Phase 1 `runs/phase1_hifi_circles` (3000 iterations, ~1.6 s each, 80 min): return 1395 at
+500, 1402–1424 through 2500, 1381 at 2999 (crash 0.00–0.02). Check with sensors on (512
+envs, shuttle_under + pass_over): π on the true z 2.0 % crashes (all flips; shuttle 3.6 %),
+position RMS 1.24 cm, command lead +56 ms; geometric+UDE 0 %, 18.5 cm, −196 ms.
+
+Phase 2 `runs/phase2_hifi_circles` (3000 iterations, 0.97 s each, 49 min): crash rate 1.0
+for iterations ~100–300 (π falls over on a poor ẑ; the old model never did), 0.08 by
+1000, 0.09 on average over the last 500. loss_rel 0.80 (100) → 0.57 (300) → 0.40 (1000)
+→ 0.31 (2000) → 0.26 (2999), still falling; phase2_circles_3000 reached 0.136. z_var fell
+from 2.6e3 to ~100 as the crashes stopped: part of z follows the drone's state.
+
+The chain `runs/chain_phase2_hifi.sh` waited with `pgrep -f "<phase 1 command>"`, which
+matched its own launcher shell's command line, so Phase 2 started by hand ~1 h late.
+Chains now run their steps in sequence in one script (`runs/chain_hifi_z8.sh`).
+
+Evaluation, all 9 scenarios, 4096 envs, geometric+UDE at the flight filters (T 0.5 / 0.75):
+
+| controller | sensors on (`eval_sensors/`): crash % | position RMS (p95) cm | lead ms | sensors off (`eval_nosensors/`): crash % | position RMS (p95) cm |
+|---|---|---|---|---|---|
+| π on ẑ | 10.2 | 2.59 (5.28) | +20 | 1.0 | 2.52 (4.73) |
+| π on true z | 2.3 | 1.47 (2.82) | +56 | 0.2 | 1.78 (3.24) |
+| π, z = 0 / z = mean | 100 / 100 | | | | |
+| geometric+UDE | 0.0 | 15.52 (35.14) | −188 | 0.0 | 15.95 (36.43) |
+
+π on ẑ per scenario (crash %, position RMS cm): hover_over 11.3, 2.60; pass_over 5.0, 1.41;
+approach_hover_leave 5.8, 2.08; far 5.0, 0.87; circle_same 14.4, 2.96; circle_opposite
+12.6, 2.75; figure8_same 13.6, 3.02; figure8_opposite 9.4, 3.04; shuttle_under 14.9, 4.91.
+Crashes are flips (collisions ≤ 0.2 %). Sensors off: `sensor_delay` = 0 in e_t, below the
+3–6 step training range; the env now keeps that field without the sensor model so the
+sensor-trained checkpoint loads.
+
+Stress (`runs/phase2_hifi_circles/stress/`, 2048 envs, sensors on in every condition, UDE T
+0.5/0.75, 0.2/0.4, 0.1/0.2; best UDE was 0.1/0.2, the fastest, in every condition).
+Survival % (position RMS cm, p95), action rate |Δa|:
+
+| condition | π on ẑ | z=true | UDE best |
+|---|---|---|---|
+| nominal (= noise ×1) | 89.79 (2.56, 5.09) 0.042 | 97.46 (1.42, 2.83) 0.036 | 99.95 (9.43, 27.8) 0.034 |
+| randomization ×2 | 65.53 (6.17, 15.8) | 88.82 (2.62, 4.75) | 86.87 (27.5, 109) |
+| wake gain 2.5–3 | 70.12 (4.95, 11.6) | 88.28 (3.09, 7.19) | 99.27 (23.5, 52.9) |
+| gap 0.38–0.45 m | 86.18 (2.81, 5.50) | 95.65 (1.64, 3.48) | 99.41 (12.9, 34.0) |
+| combined | 56.59 (6.77, 18.1) | 81.25 (3.89, 10.7) | 88.96 (37.5, 94.4) |
+| latency only | 89.50 (2.58, 5.18) 0.019 | 97.66 (1.44, 2.88) 0.011 | 99.95 (9.41, 27.9) 0.007 |
+| noise ×2 | 89.84 (2.52, 4.93) 0.072 | 97.31 (1.47, 2.86) 0.067 | 99.95 (9.46, 27.9) 0.066 |
+| noise ×5 | 90.09 (2.95, 4.98) 0.179 | 97.27 (1.57, 2.95) 0.173 | 99.95 (9.64, 28.3) 0.163 |
+
+Onset peak p95 (π on ẑ / UDE best): nominal 8.7 / 36.4 cm, wake gain 11.9 / 65.8, combined
+14.3 / 98.4; command lead +20 / −24 ms nominal.
+
+Findings:
+- Retraining with the sensor model fixed the tracking (phase2_circles_3000 under the same
+  noise and 3–6 step latency: 87.1 % survival, 6.6 cm) but not the survival: 10 % flips.
+- π cannot fly without the per-step z: z = 0 and z = mean flip in every episode
+  (phase2_circles_3000: error ×3, no crashes). The only new per-step factor in e_t is
+  `rotor_speed`; π leans on it through z.
+- The flips need the sensor model: without it π on ẑ crashes 1.0 % (true z 0.2 %), with
+  it 10.2 % (true z 2.3 %), though φ's error is the same (‖ẑ − z‖² 25.6 against 24.7,
+  z_var ~100). They occur without a wake too (far, sensors on: 5.0 % on ẑ, 0.9 % on the
+  true z).
+- π tracks ~6× tighter than geometric+UDE and leads the wake (+20 ms against −188 ms).
+- Noise ×1 → ×5 leaves survival and tracking flat and raises the action rate ~4×; the
+  latency alone gives the same survival.
+- Wider randomization, strong wakes and the combined condition cost π far more survival
+  than the UDE (65.5 / 70.1 / 56.6 against 86.9 / 99.3 / 89.0 %).
+
+Decision (user, 2026-11-23): remove `rotor_speed` from e_t, z back to 8, rerun Phase 1,
+Phase 2 and every evaluation.

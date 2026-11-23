@@ -6,7 +6,7 @@ import torch
 
 from ..configs import RobustControllerCfg
 from ..envs import ProxQuadEnv
-from ..envs.controller import GeometricController, RobustGeometricController
+from ..envs.controller import RobustGeometricController
 from ..envs.observations import POLICY_INPUTS
 from ..models import AdaptationModule, BasePolicy, EnvFactorEncoder
 
@@ -24,27 +24,9 @@ class Controller:
         return {}
 
 
-class GeometricBaseline(Controller):
-    """Lee controller on the nominal model (the top drone's gains), tracking the same
-    reference as the policy. Knows nothing of the randomization or the downwash. Flies on
-    the measured state (env.measured_state)."""
-
-    def __init__(self, env: ProxQuadEnv, name: str = "geometric"):
-        self.name = name
-        self.ctrl = GeometricController(env.cfg.top_controller, env.bottom, env.dt, env.n, env.dev)
-        self.n, self.dev = env.n, env.dev
-
-    def reset(self, ids=None):
-        self.ctrl.reset(torch.arange(self.n, device=self.dev) if ids is None else ids)
-
-    @torch.no_grad()
-    def act(self, env, obs):
-        ref = env.scenario.bottom_reference(env.steps.float() * env.dt)
-        return env.omega_to_action(self.ctrl(env.measured_state("bottom"), ref))
-
-
-class RobustGeometricBaseline(GeometricBaseline):
-    """Geometric controller + UDE (env.cfg.robust_controller): estimates the lumped
+class RobustGeometricBaseline(Controller):
+    """Geometric controller + UDE on the nominal model (env.cfg.robust_controller), tracking
+    the same reference as the policy, on the measured state: estimates the lumped
     disturbance force and torque from its own state and commands and compensates them.
     The non-learned counterpart of phi. cfg: default env.cfg.robust_controller."""
 
@@ -54,6 +36,14 @@ class RobustGeometricBaseline(GeometricBaseline):
         self.ctrl = RobustGeometricController(cfg or env.cfg.robust_controller, env.bottom,
                                               env.dt, env.n, env.dev)
         self.n, self.dev = env.n, env.dev
+
+    def reset(self, ids=None):
+        self.ctrl.reset(torch.arange(self.n, device=self.dev) if ids is None else ids)
+
+    @torch.no_grad()
+    def act(self, env, obs):
+        ref = env.scenario.bottom_reference(env.steps.float() * env.dt)
+        return env.omega_to_action(self.ctrl(env.measured_state("bottom"), ref))
 
 
 class Phase1Policy(Controller):

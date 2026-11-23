@@ -6,9 +6,9 @@ bottom drone: ego drone, flown directly by the RL policy (rotor speed commands, 
               disturbed by the top drone's downwash.
 top drone:    nominal X650 on a geometric controller, tracking a scripted scenario.
               No disturbances act on it.
-sensors:      off by default. On (SensorCfg): pi's inputs and phi's histories are built
-              from both drones' measured states (delayed + noisy); rewards, terminations,
-              e_t and the top drone's own controller keep the true states.
+sensors:      on by default on dev_RMA (SensorCfg). pi's inputs, phi's histories and the
+              top drone's own controller use both drones' measured states (delayed +
+              noisy); rewards, terminations, e_t and the critic's inputs keep the true states.
 
 One control step (dt = decimation x 0.002 s):
     obs_t was built from s_t and the downwash over [t, t+dt)
@@ -313,10 +313,12 @@ class ProxQuadEnv:
 
         # Current time in the episode
         t = self.steps.float() * self.dt
-        # The top and the bottom drones' state
+        # The top and the bottom drones' state, true and measured
         self._bot_state, self._top_state = bot, top = self._state("bottom"), self._state("top")
-        # The top drone's command
-        self._top_cmd = self.top_ctrl(top, self.scenario.top_reference(t))
+        self._bot_meas, self._top_meas = (self.sensors.measure(bot, top) if self.sensors
+                                          else (bot, top))
+        # The top drone's command, from its measured state
+        self._top_cmd = self.top_ctrl(self._top_meas, self.scenario.top_reference(t))
 
         # Compute the downwash and drag forces on the bottom drone
         t0 = time.perf_counter()
@@ -328,11 +330,22 @@ class ProxQuadEnv:
 
         self.timing["aero"] += time.perf_counter() - t0  # To time the downwash computation
         
-        # Build the observation dict from the measured states
-        self._bot_meas, self._top_meas = (self.sensors.measure(bot, top) if self.sensors
-                                          else (bot, top))
+        # Build the observation dict: measured states for pi / phi, true ones for the critic
         self._obs = self._build_obs(self._bot_meas, self._top_meas,
                                     self._tracking_errors(self._bot_meas))
+        if self.sensors is None:
+            self._obs["tracking_err_true"], self._obs["top_true"] = (self._obs["tracking_err"],
+                                                                     self._obs["top"])
+        else:
+            self._obs["tracking_err_true"] = pack(TRACKING_LAYOUT, self._tracking_errors(bot))
+            self._obs["top_true"] = self._top_obs(bot, top)
+
+    def _top_obs(self, bot: DroneState, top: DroneState) -> torch.Tensor:
+        rel_pos, rel_vel = top.pos - bot.pos, top.vel - bot.vel
+        return pack(TOP_LAYOUT, {
+            "rel_pos": rel_pos, "rel_vel": rel_vel, "rotmat": top.R,
+            "ang_vel": top.omega, "prev_action": self.top_prev_action,
+        })
 
     def _build_obs(self, bot: DroneState, top: DroneState, err: dict[str, torch.Tensor]):
         # Build the observation dict, including the proprioception, the top drone's state, and the privileged factors.
@@ -356,22 +369,18 @@ class ProxQuadEnv:
             "wake_gain": wake[:, 0], "wake_spread": wake[:, 1],
             "rotor_wake_coeff": wake[:, 2], "airframe_cda": wake[:, 3],
             "wake_delay_scale": wake[:, 4:],
+            "sensor_delay": (self.sensors.delay["bottom"].float() / (sum(
+                self.cfg.sensors.bottom_delay_steps) / 2) if self.sensors else
+                torch.zeros(self.n, device=self.dev)),
             "rotor_speed": self.bot_motors.omega / bp.omega_hover - 1.0,
             "rotor_thrust_ratio": self._aero.thrust_ratio,
             "wake_drag": self._aero.drag / W,
         }
         priv = pack(self.priv_layout, factors)
         
-        # Pack the top drone's observation and action
-        rel_pos, rel_vel = top.pos - bot.pos, top.vel - bot.vel
-        top_obs = pack(TOP_LAYOUT, {
-            "rel_pos": rel_pos, "rel_vel": rel_vel, "rotmat": top.R,
-            "ang_vel": top.omega, "prev_action": self.top_prev_action,
-        })
-
         return {"proprio": proprio, "tracking_err": tracking,
                 "prev_action": self.prev_action.clone(),
-                "top": top_obs, "priv": priv}
+                "top": self._top_obs(bot, top), "priv": priv}
 
     def _substeps(self) -> None:
         """Copy the per-substep actuator inputs into d.ctrl, then step the physics"""

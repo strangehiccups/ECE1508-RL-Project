@@ -1,6 +1,7 @@
 """State estimates seen by the bottom drone's controller (SensorCfg), for both drones:
 each drone's true state delayed by d control steps (d drawn per episode, per drone), plus
 white noise per axis on position, velocity, attitude (body-frame rotation) and body rate.
+A level in [0, 1] (training ramp) scales the noise and the drawn delays (round(level x d)).
 """
 
 import torch
@@ -29,6 +30,11 @@ class SensorModel:
         self.std = {"pos": t(cfg.pos_std), "vel": t(cfg.vel_std),
                     "att": torch.deg2rad(t(cfg.att_std_deg)), "omega": t(cfg.ang_vel_std)}
         self.envs = torch.arange(num_envs, device=device)
+        self.level = 1.0
+
+    def set_level(self, level: float) -> None:
+        """Noise and delays (episodes starting from now on) x level."""
+        self.level = min(max(float(level), 0.0), 1.0)
 
     def seed(self, seed: int) -> None:
         self.gen.manual_seed(seed)
@@ -36,8 +42,8 @@ class SensorModel:
     def reset(self, ids: torch.Tensor) -> None:
         """New episode: draw delays; the next measure() fills the buffer with that state."""
         for k, (lo, hi) in self.ranges.items():
-            self.delay[k][ids] = torch.randint(lo, hi + 1, (len(ids),), device=self.dev,
-                                               generator=self.gen)
+            d = torch.randint(lo, hi + 1, (len(ids),), device=self.dev, generator=self.gen)
+            self.delay[k][ids] = (self.level * d).round().long()
         self.fresh[ids] = True
 
     def measure(self, bot: DroneState, top: DroneState) -> tuple[DroneState, DroneState]:
@@ -57,7 +63,7 @@ class SensorModel:
         return out[0], out[1]
 
     def _noisy(self, x: dict[str, torch.Tensor]) -> DroneState:
-        s = self.cfg.noise_scale
+        s = self.cfg.noise_scale * self.level
         g = lambda v: torch.randn(v.shape, device=self.dev, generator=self.gen)  # noqa: E731
         pos = x["pos"] + s * self.std["pos"] * g(x["pos"])
         vel = x["vel"] + s * self.std["vel"] * g(x["vel"])

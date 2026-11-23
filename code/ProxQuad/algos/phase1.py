@@ -16,7 +16,7 @@ import torch.nn as nn
 
 from ..configs import Phase1Cfg
 from ..envs import ProxQuadEnv
-from ..envs.observations import POLICY_INPUTS
+from ..envs.observations import CRITIC_INPUTS, POLICY_INPUTS
 from ..envs.scenarios import SCENARIOS
 from ..models import BasePolicy, Critic, EnvFactorEncoder
 from .storage import RolloutStorage
@@ -30,7 +30,7 @@ class Phase1Trainer:
         dims = dict(POLICY_INPUTS)  # Determine the inputs the policy sees
         self.encoder = EnvFactorEncoder(E.priv_dim, cfg.z_dim, cfg.encoder).to(E.dev)
         self.policy = BasePolicy(dims, cfg.z_dim, E.action_dim, cfg.policy, E.a_hover).to(E.dev)
-        self.critic = Critic(dims, E.priv_dim, cfg.critic).to(E.dev)
+        self.critic = Critic(dict(CRITIC_INPUTS), E.priv_dim, cfg.critic).to(E.dev)
 
         # Adam optimizer; gradients are clipped per network in update()
         self.actor_params = [*self.encoder.parameters(), *self.policy.parameters()]
@@ -38,7 +38,8 @@ class Phase1Trainer:
         self.lr = cfg.ppo.lr
         self.opt = torch.optim.Adam(self.actor_params + self.critic_params, lr=self.lr)
 
-        self.storage = RolloutStorage(cfg.rollout_steps, E.n, {**dims, "priv": E.priv_dim},
+        self.storage = RolloutStorage(cfg.rollout_steps, E.n,
+                                      {**dims, **dict(CRITIC_INPUTS), "priv": E.priv_dim},
                                       E.action_dim, E.dev)
         self.writer = SummaryWriter(cfg.log_dir)
 
@@ -226,6 +227,8 @@ class Phase1Trainer:
         std = P.log_std.clamp(*P.log_std_bounds).exp()
         scalars["train/action_std"] = std.mean().item()
         scalars["train/lipschitz_bound"] = P.lipschitz_bound()
+        if self.env.sensors is not None:
+            scalars["train/sensor_level"] = self.env.sensors.level
 
         # For episodes finished in this iteration: compute averages, per reward term, crash reason, scenario
         if self.finished:
@@ -277,14 +280,22 @@ class Phase1Trainer:
                     "critic": self.critic.state_dict(),
                     "cfg": self.cfg}, path)
 
+    def sensor_ramp(self, it: int) -> None:
+        """Sensor noise and latency x it / sensor_ramp_iterations (capped at 1)."""
+        if self.env.sensors is not None:
+            n = self.cfg.sensor_ramp_iterations
+            self.env.sensors.set_level(1.0 if n <= 0 else it / n)
+
     def train(self) -> None:
         """Warm-up, then per iteration: rollout -> PPO update -> normalizers -> log / save."""
+        self.sensor_ramp(0)
         for _ in range(self.cfg.ppo.warmup_rollouts):
             self.collect_rollout()
             self.update_norms(self.storage.obs)
         self.finished.clear()
         self._timing_prev = dict(self.env.timing)
         for it in range(self.cfg.iterations):
+            self.sensor_ramp(it)
             t0 = time.perf_counter()
             self.collect_rollout()
             t1 = time.perf_counter()

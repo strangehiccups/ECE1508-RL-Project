@@ -54,6 +54,7 @@ def per_env(rec: Recording, settle_s: float = 2.0) -> dict[str, torch.Tensor]:
         "length_s": a.sum(0) * rec.dt,
         "pos_rms_cm": 100 * rms(s["pos_err"]),
         "pos_max_cm": 100 * peak(s["pos_err"]),
+        "top_rms_cm": 100 * rms(s["top_err"]),
         "vel_rms": rms(s["vel_err"]),
         "ang_vel_rms": rms(s["ang_vel_err"]),
         "tilt_rms_deg": rms(s["tilt_deg"]),
