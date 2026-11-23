@@ -586,3 +586,66 @@ Findings:
 
 Decision (user, 2026-11-23): remove `rotor_speed` from e_t, z back to 8, rerun Phase 1,
 Phase 2 and every evaluation.
+
+### 2026-11-23 · phase1_hifi_z8_circles → phase2_hifi_z8_circles (e_t 27 without `rotor_speed`, z 8)
+
+Same setup as the entry above, except e_t (no rotor speeds) and z. Chain
+`runs/chain_hifi_z8.sh` (log `runs/chain_hifi_z8.log`): Phase 1 77 min, Phase 2 48 min,
+evaluations 11 min, stress 77 min (4 UDE pairs).
+
+Phase 1: return 1234 at 500, 1328–1371 from 1000 on (z 12 with rotor speeds: 1400–1424),
+crash ≤ 0.02. Phase 2: no all-crash phase (crash 0.11–0.33 up to iteration 300, 0.02 on
+average over the last 500); z_var flat at 62–71 throughout; loss_rel 0.87 (100) → 0.30
+(500) → 0.25 (1000) → 0.20 (1500) → 0.17 (2999), against 0.26 with the rotor speeds and
+0.136 for phase2_circles_3000.
+
+Evaluation, all 9 scenarios, 4096 envs (`runs/phase2_hifi_z8_circles/eval_sensors/`,
+`eval_nosensors/`); z 12 with rotor speeds in brackets:
+
+| controller | sensors on: crash % | position RMS (p95) cm | lead ms | sensors off: crash % | position RMS (p95) cm |
+|---|---|---|---|---|---|
+| π on ẑ | 2.1 [10.2] | 3.46 (5.84) [2.59] | +24 [+20] | 0.0 [1.0] | 2.80 (4.75) [2.52] |
+| π on true z | 0.8 [2.3] | 2.27 (4.21) [1.47] | +52 [+56] | 0.0 [0.2] | 2.28 (4.03) [1.78] |
+| π, z = 0 | 54.5 [100] | 25.9 (71.4) | | | |
+| π, z = mean | 15.3 [100] | 12.2 (27.7) | | | |
+| geometric+UDE (T 0.5 / 0.75) | 0.0 | 15.52 (35.14) | −188 | 0.0 | 15.95 (36.43) |
+
+π on ẑ with sensors, per scenario (crash %, position RMS cm): hover_over 3.6, 4.14; pass_over
+1.5, 2.18; approach_hover_leave 2.5, 3.00; far 1.8, 1.51; circle_same 1.0, 3.40;
+circle_opposite 1.9, 3.74; figure8_same 2.7, 4.56; figure8_opposite 2.2, 3.65;
+shuttle_under 2.0, 4.88. Crashes are still nearly all flips (1.9 of 2.1 %). ‖ẑ − z‖²
+11.4 with sensors, 34.5 without (sensor_delay = 0 lies outside μ's training range, so
+the true z moves away from what φ predicts; π on ẑ still never crashes).
+
+Stress (`runs/phase2_hifi_z8_circles/stress/`, 2048 envs, sensors on, UDE T 0.5/0.75,
+0.2/0.4, 0.1/0.2, 0.05/0.1; best by position RMS was 0.1/0.2 everywhere). Survival %
+(position RMS cm, p95); z 12 with rotor speeds: π on ẑ survival in brackets:
+
+| condition | π on ẑ | z=true | UDE best |
+|---|---|---|---|
+| nominal (= noise ×1) | 98.19 (3.33, 5.74) [89.79] | 99.22 (2.35, 4.26) | 99.95 (9.43, 27.8) |
+| randomization ×2 | 73.93 (13.3, 58.8) [65.53] | 83.84 (8.86, 35.7) | 86.87 (27.5, 109) |
+| wake gain 2.5–3 | 84.23 (8.00, 25.3) [70.12] | 93.41 (5.15, 13.6) | 99.27 (23.5, 52.9) |
+| gap 0.38–0.45 m | 95.21 (4.07, 6.89) [86.18] | 96.53 (2.62, 5.33) | 99.41 (12.9, 34.0) |
+| combined | 66.55 (14.0, 56.2) [56.59] | 82.96 (8.68, 30.4) | 88.96 (37.5, 94.4) |
+| latency only | 98.19 (3.23, 5.67) [89.50] | 99.37 (2.22, 4.26) | 99.95 (9.41, 27.9) |
+| noise ×2 | 98.68 (3.26, 5.82) [89.84] | 99.17 (2.36, 4.25) | 99.95 (9.46, 27.9) |
+| noise ×5 | 98.14 (3.66, 6.24) [90.09] | 99.07 (2.48, 4.49) | 99.95 (9.64, 28.3) |
+
+Onset peak p95 (π on ẑ / UDE best): nominal 10.3 / 36.4 cm, wake gain 16.0 / 65.8,
+combined 20.7 / 98.4; command lead +20 / −24 ms nominal. UDE 0.05/0.1: nominal 99.90 %,
+17.0 cm (worse than 0.1/0.2), but the most survival when stressed (randomization ×2 89.2 %,
+combined 93.4 %).
+
+Findings:
+- Dropping `rotor_speed` fixed the flips: π on ẑ 10.2 → 2.1 % with sensors, 1.0 → 0 %
+  without. z is a parameter again: z = mean costs 12 cm and 15 % crashes instead of every
+  episode, z_var no longer follows the state, and φ fits it better (loss_rel 0.17).
+- The price is tracking: π on ẑ 2.59 → 3.46 cm, true z 1.47 → 2.27 cm (the rotor state
+  is now hidden from π). Still 4.5× tighter than geometric+UDE, and π still leads the
+  wake (+24 against −188 ms).
+- Noise up to ×5 changes neither survival nor tracking much; latency alone gives the
+  same survival as latency + noise.
+- Outside the training ranges π still loses on survival to the UDE (randomization ×2
+  73.9 against 86.9 %, wake gain 84.2 against 99.3 %, combined 66.6 against 89.0 %) while
+  keeping 2–3× lower position error; even π on the true z trails the UDE there.
