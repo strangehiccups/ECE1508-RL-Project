@@ -65,10 +65,13 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
 - MuJoCo-Warp on GPU (same stack as `code/quad`).
 - Both drones are the FSC X650 from `fsc_PegasusSimulator` branch `dev_CCM`.
 - Motors: the dev_CCM rotor lag is **on** since 2026-11-22 (`MotorCfg.rotor_lag`, was off:
-  plain thrust curve). It adds rotor speeds and λ to e_t, since the lag makes
-  (x_t, a_{t-1}) non-Markov. Both drones lag (the top drone's k_R = 20 was chosen for it).
+  plain thrust curve). It adds λ to e_t. The rotor speeds left e_t on 2026-11-23 (user):
+  π leaned on them through z and flipped when φ misjudged them, so (x_t, a_{t-1}) is now
+  non-Markov for π. Both drones lag (the top drone's k_R = 20 was chosen for it).
   Checkpoints trained before 2026-11-22 (24-dim e_t: no rotor lag, no transport delay) do
-  not run on this branch; they stay on `dev_enoch`, where both are off.
+  not run on this branch; they stay on `dev_enoch`, where both are off. The 31-dim
+  `runs/phase*_hifi_circles` checkpoints (rotor speeds in e_t, z 12) run at commit
+  `f4c609c`.
 - Rates (2026-11-19, was 100 Hz / 10 Hz as in RMA): policy **250 Hz** (2 × 2 ms physics),
   adaptation module **125 Hz** (every 2 policy steps; 100 Hz is not a whole number of
   4 ms steps) with the policy reusing the latest ẑ in between, histories 0.5 s = 125
@@ -281,7 +284,7 @@ the top drone directly) would compensate for downwash that has not arrived yet. 
 
 Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCfg` /
 `AdaptationCfg`), following RMA; activations ELU (RMA does not state them):
-- μ: e_t (24) → 256 → 128 → z (8), linear output.
+- μ: e_t (24 in RMA terms; 27 on dev_RMA) → 256 → 128 → z (8), linear output.
 - π: [x̃_t, a_{t-1}, o_t^top] (44) + z (8) → 128 → 128 → 4. Diagonal Gaussian: the network
   gives the mean, log σ is a learned vector independent of the state (no variance
   network; PPO-style, as in `code/quad`), σ₀ = 0.2 throttle, clamped to e^[−5, 0.5].
@@ -321,7 +324,7 @@ Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCf
 - Critic: separate MLP 256 → 256, asymmetric: [x̃_t, a_{t-1}, o_t^top, e_t] with the raw
   e_t, not μ, so the value loss does not shape z. x̃_t and o_t^top come from the true
   states (`CRITIC_INPUTS`: `tracking_err_true`, `top_true`), not the measured ones.
-- z: 12 dims since 2026-11-22 (was 8 as in RMA; e_t grew to 31 dims on this branch).
+- z: 8 dims as in RMA (12 from 2026-11-22 to 11-23, while e_t held the rotor speeds).
 - φ: per-step 2-layer MLP embedding (32) **per drone**, the two stacked as 64 channels,
   then RMA's 3 × 1-D conv → flatten → linear. Every conv layer mixes both drones at each
   time step (telling mass from wake needs their correlation). First conv kernel / stride
@@ -387,9 +390,10 @@ Algorithm 1), `Phase2Trainer` (`algos/phase2.py`).
 
 **Training on this branch** (2026-11-22, user decisions): rotor lag, wake transport delay
 and the sensor model on; sensor level ramped 0 → 1 over the first 500 Phase 1 iterations;
-the bottom drone's latency in e_t (31 dims); the top drone on its measured state with the
-flight gains; the critic on true states; z 12; action-rate weight 0.05 → 0.1 (under the
-measured noise the old policy's |Δa| rose ~10×, which at 0.05 already cost as much as its
+the bottom drone's latency in e_t (27 dims, no rotor speeds since 2026-11-23); the top
+drone on its measured state with the flight gains; the critic on true states; z 8;
+action-rate weight 0.05 → 0.1 (under the measured noise the old policy's |Δa| rose ~10×,
+which at 0.05 already cost as much as its
 tracking error); circles mix; Phase 1 3000 iterations; Phase 2 keeps the 0.5 s window. Not
 done: action history as a π input (user: not yet), actuation dead time (user: not needed),
 the spectral-norm ablation under noise.

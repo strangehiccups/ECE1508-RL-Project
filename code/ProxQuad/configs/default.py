@@ -417,7 +417,7 @@ class PPOCfg:
 class Phase1Cfg:
     """Phase 1: jointly train env-factor encoder mu and base policy pi with PPO."""
     env: EnvCfg = field(default_factory=EnvCfg)
-    z_dim: int = 12               # mu(e_t: 31 dims on dev_RMA) -> z_t (RMA uses 8; 12 since 2026-11-22)
+    z_dim: int = 8                # mu(e_t: 27 dims on dev_RMA) -> z_t, as in RMA
     sensor_ramp_iterations: int = 500   # sensor noise and latency ramped 0 -> 1 linearly
     policy: PolicyCfg = field(default_factory=PolicyCfg)
     critic: CriticCfg = field(default_factory=CriticCfg)

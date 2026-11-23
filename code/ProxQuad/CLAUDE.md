@@ -4,7 +4,8 @@ Design, decisions and open [CONFIRM] items: `README.md`. This file: how to run t
 the results log. `runs/` is gitignored, so results live only on this machine and here.
 
 Branch `dev_RMA`: the hardware-realism version (rotor lag, wake transport delay and the
-sensor model on by default, e_t 31 dims). Checkpoints trained before 2026-11-22
+sensor model on by default, e_t 27 dims; 31 with the rotor speeds before 2026-11-23,
+those checkpoints run at commit `f4c609c`). Checkpoints trained before 2026-11-22
 (24-dim e_t, e.g. `runs/phase2_circles_3000`) do not load here; they belong to `dev_enoch`,
 which keeps both off. Results below up to the stress tests were produced with those
 checkpoints.

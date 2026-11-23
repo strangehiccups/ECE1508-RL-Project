@@ -372,7 +372,6 @@ class ProxQuadEnv:
             "sensor_delay": (self.sensors.delay["bottom"].float() / (sum(
                 self.cfg.sensors.bottom_delay_steps) / 2) if self.sensors else
                 torch.zeros(self.n, device=self.dev)),
-            "rotor_speed": self.bot_motors.omega / bp.omega_hover - 1.0,
             "rotor_thrust_ratio": self._aero.thrust_ratio,
             "wake_drag": self._aero.drag / W,
         }
