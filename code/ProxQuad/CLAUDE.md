@@ -5,7 +5,8 @@ the results log. `runs/` is gitignored, so results live only on this machine and
 
 Branch `dev_RMA`: the hardware-realism version (rotor lag, wake transport delay and the
 sensor model on by default, e_t 27 dims; 31 with the rotor speeds before 2026-11-23,
-those checkpoints run at commit `f4c609c`). Checkpoints trained before 2026-11-22
+those checkpoints run at commit `f4c609c`). Training draws the bottom drone's sensor delay
+from 3–8 steps, evaluation from the measured 3–6 (`TRAIN_BOTTOM_DELAY_STEPS`). Checkpoints trained before 2026-11-22
 (24-dim e_t, e.g. `runs/phase2_circles_3000`) do not load here; they belong to `dev_enoch`,
 which keeps both off. Results below up to the stress tests were produced with those
 checkpoints.
@@ -21,6 +22,8 @@ The venv is `code/.venv`; run through `uv` with `PYTHONPATH=$PWD`.
   writes `runs/<name>/eval/` (summary.json, summary.csv, PNGs incl. `<scenario>_onset.png`)
 - Stress tests (Phase 2 checkpoint vs geometric+UDE at several filter pairs): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.stress --checkpoint runs/<phase2>/model.pt [--conditions ...] [--envs N]`
   writes `runs/<phase2>/stress/` (stress.json, stress.csv)
+- Crash diagnosis (Phase 2 checkpoint; π on ẑ and on the true z, same episodes, sensors on): `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.crash_diag --checkpoint runs/<phase2>/model.pt`
+  prints crash % per bottom delay, timing, factor quintiles and the flips' last second; writes `runs/<phase2>/crash_diag/crash_diag.npz`
 - Sensor noise from flight logs: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.measure_sensor_noise ../../CCM_quad/bags/plots/x650_*_2026-11-*.npz`
   (CPU only; source of the `SensorCfg` defaults)
 - Video: `PYTHONPATH=$PWD uv run python -m ProxQuad.scripts.view_episode --checkpoint runs/<name>/model.pt --scenario <s> --video out.mp4`
@@ -649,3 +652,89 @@ Findings:
 - Outside the training ranges π still loses on survival to the UDE (randomization ×2
   73.9 against 86.9 %, wake gain 84.2 against 99.3 %, combined 66.6 against 89.0 %) while
   keeping 2–3× lower position error; even π on the true z trails the UDE there.
+
+### 2026-11-23 · crash diagnosis of phase2_hifi_z8_circles, three changes
+
+`scripts/crash_diag.py` (4096 envs, sensors on, seed 0): π on ẑ 2.15 % crashes (flipped
+1.93, lost 0.12, ground 0.05, collision 0.05), true z 0.78 %; of 88 ẑ crashes the true z
+survives 63. Crash % by bottom delay 3 / 4 / 5 / 6 steps: 0.0 / 0.3 / 1.4 / 6.8 (true z
+0.0 / 0.2 / 0.5 / 2.4); at 6 steps the slowest third of rotor λ 13.7 % against 3.3 %. Top
+delay, motor imbalance, gusts, inertia: no trend; wake gain and CoM offset raise ẑ crashes
+only (0.7 → 3.5 %, 0.9 → 4.0 % by quintile). Flips: a ~2 Hz roll/pitch oscillation grows
+(×2.7 median over the last second), motors saturate (36 % → 68 % at the end), tilt 20° →
+78° in 0.23 s; ‖ẑ − z‖² ~57 in the second before (survivors 8.9). Two thirds come 1–3 s
+into the episode (mostly outside the wake, ẑ from a zero-padded history); later ones are
+wake encounters (89 % in the wake) that the true z survives (96 %).
+
+Changes (user, 2026-11-23): π and the critic see the last K = 8 commands; the bottom drone's
+delay is drawn from 3–8 steps in training (evaluation 3–6, `sensor_delay` / 4.5 fixed); φ's
+histories start filled with the reset step. Results in the next entry.
+
+### 2026-11-23 · phase1_hifi_ahist_circles → phase2_hifi_ahist_circles (K = 8 commands, training delay 3–8, reset-filled φ histories)
+
+Chain `runs/chain_hifi_ahist.sh` (log `runs/chain_hifi_ahist.log`, 14:31–17:37): Phase 1
+78 min, Phase 2 56 min, evaluations 11 min, stress 38 min (UDE 0.1/0.2 only; the
+baseline's other pairs are in the z8 entry, same env and seed), crash diagnosis 3 min.
+The three changes were trained together, so the gains below cannot be split among them.
+
+Phase 1: return 1317 at 500, 1384–1411 from 1000 on (z8: 1234, 1328–1371); crash 0.004 on
+average over the last 500 iterations, single spikes up to 0.43. Phase 2: loss_rel 3.59 (0)
+→ 0.96 (100) → 0.36 (500) → 0.28 (1000) → 0.24 (1500) → 0.18 (2999) (z8: 0.17); z_var 80–87
+(z8: 62–71); crash up to 0.42 in the first 300 iterations, 0.008 on average over the last 500.
+
+Evaluation, all 9 scenarios, 4096 envs (`runs/phase2_hifi_ahist_circles/eval_sensors/`,
+`eval_nosensors/`); z8 in brackets:
+
+| controller | sensors on: crash % | position RMS (p95) cm | lead ms | sensors off: crash % | position RMS (p95) cm |
+|---|---|---|---|---|---|
+| π on ẑ | 0.1 [2.1] | 2.84 (5.63) [3.46] | +32 [+24] | 0.0 [0.0] | 2.81 (5.03) [2.80] |
+| π on true z | 0.0 [0.8] | 1.65 (3.50) [2.27] | +52 [+52] | 0.0 [0.0] | 2.14 (3.92) [2.28] |
+| π, z = 0 | 1.4 [54.5] | 17.0 (26.0) [25.9] | | | |
+| π, z = mean | 0.0 [15.3] | 7.70 (12.7) [12.2] | | | |
+| geometric+UDE (T 0.5 / 0.75) | 0.0 | 15.52 (35.14) | −188 | 0.0 | 15.95 (36.43) |
+
+π on ẑ with sensors, per scenario (crash %, position RMS cm): hover_over 0.2, 2.80;
+pass_over 0.0, 1.72; approach_hover_leave 0.0, 2.35; far 0.0, 1.02; circle_same 0.2, 2.99;
+circle_opposite 0.4, 2.79; figure8_same 0.0, 3.43; figure8_opposite 0.0, 3.24;
+shuttle_under 0.0, 5.21. Motors at the limit 0.10 % of steps (z8 0.66), action rate 0.039
+(0.043). ‖ẑ − z‖² 14.8 with sensors, 58.6 without (z8 11.4 / 34.5).
+
+Stress (`runs/phase2_hifi_ahist_circles/stress/`, 2048 envs, sensors on). Survival %
+(position RMS cm, p95); z8 survival in brackets:
+
+| condition | π on ẑ | z=true | UDE 0.1/0.2 |
+|---|---|---|---|
+| nominal (= noise ×1) | 99.90 (2.81, 5.45) [98.19] | 100.00 (1.66, 3.51) [99.22] | 99.95 (9.43, 27.8) |
+| randomization ×2 | 97.17 (5.50, 9.78) [73.93] | 98.88 (2.81, 5.38) [83.84] | 86.87 (27.5, 109) |
+| wake gain 2.5–3 | 96.34 (4.95, 9.71) [84.23] | 99.27 (3.37, 7.87) [93.41] | 99.27 (23.5, 52.9) |
+| gap 0.38–0.45 m | 98.63 (3.09, 5.89) [95.21] | 99.12 (1.89, 4.19) [96.53] | 99.41 (12.9, 34.0) |
+| combined | 90.23 (6.80, 15.9) [66.55] | 97.07 (4.19, 9.97) [82.96] | 88.96 (37.5, 94.4) |
+| latency only | 99.90 (2.81, 5.47) [98.19] | 100.00 (1.67, 3.50) [99.37] | 99.95 (9.41, 27.9) |
+| noise ×2 | 99.90 (2.82, 5.51) [98.68] | 100.00 (1.66, 3.50) [99.17] | 99.95 (9.46, 27.9) |
+| noise ×5 | 99.85 (3.02, 5.36) [98.14] | 100.00 (1.87, 3.64) [99.07] | 99.95 (9.64, 28.3) |
+
+Onset peak p95 (π on ẑ / UDE): nominal 9.7 / 36.4 cm, wake gain 14.6 / 65.8, combined
+17.1 / 98.4; command lead +28 / −24 ms nominal.
+
+Crash diagnosis (`crash_diag/`, 4096 envs, seed 0): π on ẑ 4 crashes (0.10 %, all flips),
+true z none. By bottom delay 3 / 4 / 5 / 6 steps: 0.0 / 0.0 / 0.2 / 0.2 % (z8 0.0 / 0.3 /
+1.4 / 6.8). All four come in the first 2 s, in the wake (hover_over 1, circle_same 1,
+circle_opposite 2), with ‖ẑ − z‖² ~125 in the second before (survivors 13.5); the same ~2 Hz
+growing oscillation as before (×2.2).
+
+Findings:
+- Crashes with sensors drop from 2.1 to 0.1 % (π on ẑ) and from 0.8 to 0 % (true z); at a
+  6-step delay from 6.8 to 0.2 %. The early flips outside the wake are gone.
+- Tracking improves as well: 3.46 → 2.84 cm on ẑ, 2.27 → 1.65 cm on the true z, and the
+  motors saturate 6× less.
+- π no longer needs ẑ to stay upright: z = mean crashes 0.0 % (z8 15.3 %) at 7.7 cm, z = 0
+  1.4 % (54.5 %). z still carries the tracking (2.8 against 7.7 cm). Likely the command
+  window gives π the delay and rotor-lag information it used to take from z.
+- Stress: π on ẑ now outlasts the UDE 0.1/0.2 under randomization ×2 (97.2 against
+  86.9 %) and combined (90.2 against 89.0 %; UDE 0.05/0.1 93.4 %), and still trails it under
+  wake gain (96.3 against 99.3 %) and the small gap (98.6 against 99.4 %), at 3–5× lower
+  position error.
+- φ fits slightly worse (‖ẑ − z‖² 14.8 against 11.4, with z_var 82 against 62); without
+  sensors 58.6, since sensor_delay = 0 is further outside the 3–8-step training range. π
+  on ẑ still never crashes there (2.81 cm).
+

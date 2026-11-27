@@ -24,8 +24,8 @@ import torch
 from ..configs import EnvCfg
 from ..envs import ProxQuadEnv
 from ..envs.scenarios import SCENARIOS
-from ..eval import (Phase1Policy, Phase2Policy, RobustGeometricBaseline, load_phase2, rollout,
-                    summarize)
+from ..eval import (Phase1Policy, Phase2Policy, RobustGeometricBaseline, load_phase2, match_obs,
+                    rollout, summarize)
 
 
 def widen(cfg: EnvCfg, s: float) -> None:
@@ -87,9 +87,7 @@ def run_condition(args, name: str) -> dict[str, dict]:
     cfg.sim.num_envs = args.envs
     cfg.sim.stagger_first_episode = False
     cfg.scenario.top.scenario_probs = {s: 1.0 / len(args.scenarios) for s in args.scenarios}
-    obs2 = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["cfg"].env.obs
-    cfg.obs.bottom_history_len, cfg.obs.top_history_len = (obs2.bottom_history_len,
-                                                            obs2.top_history_len)
+    match_obs(cfg.obs, args.checkpoint)
     CONDITIONS[name](cfg)
     env = ProxQuadEnv(cfg)
     encoder, pi, phi, dec = load_phase2(args.checkpoint, env)

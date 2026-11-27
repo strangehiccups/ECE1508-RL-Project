@@ -33,7 +33,7 @@ from ..envs import ProxQuadEnv
 from ..envs.prox_quad_env import ASSETS
 from ..envs.scenarios import SCENARIOS
 from ..eval import (Phase1Policy, Phase2Policy, RobustGeometricBaseline,
-                    load_phase1, load_phase2)
+                    load_phase1, load_phase2, match_obs)
 
 FIELD_RGB = np.array([0.25, 0.6, 1.0])
 CYAN = np.array([0.0, 0.9, 1.0, 0.95])
@@ -118,9 +118,8 @@ def make_env(args):
     cfg.scenario.top.scenario_probs = {args.scenario: 1.0}
     cfg.aero.enabled = not args.no_downwash
     ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False) if args.checkpoint else {}
-    if "phi" in ck:       # Phase 2: phi needs its history lengths
-        o = ck["cfg"].env.obs
-        cfg.obs.bottom_history_len, cfg.obs.top_history_len = o.bottom_history_len, o.top_history_len
+    if args.checkpoint:
+        match_obs(cfg.obs, args.checkpoint)
     env = ProxQuadEnv(cfg)
     if "phi" in ck:
         ctrl = Phase2Policy(*load_phase2(args.checkpoint, env))

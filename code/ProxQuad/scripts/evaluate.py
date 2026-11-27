@@ -16,16 +16,14 @@ the true state.
 
 import argparse
 import time
-
-import torch
 from pathlib import Path
 
 from ..configs import EnvCfg
 from ..envs import ProxQuadEnv
 from ..envs.scenarios import SCENARIOS
 from ..eval import (Phase1Policy, Phase2Policy, RobustGeometricBaseline,
-                    load_phase1, load_phase2, print_summary, rollout, save_plots, save_summary,
-                    summarize)
+                    load_phase1, load_phase2, match_obs, print_summary, rollout, save_plots,
+                    save_summary, summarize)
 
 
 def parse_args():
@@ -60,10 +58,7 @@ def main() -> None:
     cfg.sensors.enabled = args.sensors or args.noise_scale is not None
     if args.noise_scale is not None:
         cfg.sensors.noise_scale = args.noise_scale
-    if args.phase == 2:   # phi's history lengths
-        obs2 = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["cfg"].env.obs
-        cfg.obs.bottom_history_len, cfg.obs.top_history_len = (obs2.bottom_history_len,
-                                                                obs2.top_history_len)
+    match_obs(cfg.obs, args.checkpoint)
     env = ProxQuadEnv(cfg)
 
     if args.phase == 2:

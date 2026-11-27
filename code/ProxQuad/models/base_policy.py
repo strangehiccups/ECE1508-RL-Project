@@ -75,7 +75,7 @@ class BasePolicy(nn.Module):
 
 class Critic(nn.Module):
     """V(x~_t, a_{t-1}, o_t^top, e_t). Asymmetric: raw e_t, no mu, so the value loss does
-    not shape z; x~_t and o_t^top from the true states (CRITIC_INPUTS). Own MLP and
+    not shape z; x~_t and o_t^top from the true states (critic_inputs). Own MLP and
     normalizer, nothing shared with pi."""
 
     def __init__(self, obs_dims: dict[str, int], priv_dim: int, cfg: CriticCfg):

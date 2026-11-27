@@ -16,7 +16,7 @@ import torch.nn as nn
 
 from ..configs import Phase1Cfg
 from ..envs import ProxQuadEnv
-from ..envs.observations import CRITIC_INPUTS, POLICY_INPUTS
+from ..envs.observations import critic_inputs, policy_inputs
 from ..envs.scenarios import SCENARIOS
 from ..models import BasePolicy, Critic, EnvFactorEncoder
 from .storage import RolloutStorage
@@ -27,10 +27,11 @@ class Phase1Trainer:
         torch.manual_seed(cfg.seed)
         self.cfg = cfg
         self.env = E = ProxQuadEnv(cfg.env)
-        dims = dict(POLICY_INPUTS)  # Determine the inputs the policy sees
+        K = cfg.env.obs.action_history_len
+        dims, cdims = dict(policy_inputs(K)), dict(critic_inputs(K))
         self.encoder = EnvFactorEncoder(E.priv_dim, cfg.z_dim, cfg.encoder).to(E.dev)
         self.policy = BasePolicy(dims, cfg.z_dim, E.action_dim, cfg.policy, E.a_hover).to(E.dev)
-        self.critic = Critic(dict(CRITIC_INPUTS), E.priv_dim, cfg.critic).to(E.dev)
+        self.critic = Critic(cdims, E.priv_dim, cfg.critic).to(E.dev)
 
         # Adam optimizer; gradients are clipped per network in update()
         self.actor_params = [*self.encoder.parameters(), *self.policy.parameters()]
@@ -39,7 +40,7 @@ class Phase1Trainer:
         self.opt = torch.optim.Adam(self.actor_params + self.critic_params, lr=self.lr)
 
         self.storage = RolloutStorage(cfg.rollout_steps, E.n,
-                                      {**dims, **dict(CRITIC_INPUTS), "priv": E.priv_dim},
+                                      {**dims, **cdims, "priv": E.priv_dim},
                                       E.action_dim, E.dev)
         self.writer = SummaryWriter(cfg.log_dir)
 

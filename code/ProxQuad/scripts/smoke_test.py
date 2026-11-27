@@ -7,8 +7,9 @@ policy: the same geometric controller the top drone uses (nominal model, no know
 of the randomization or the downwash), converted to actions. It reports observation
 layouts and shapes, throughput, per-scenario tracking of both drones with downwash on vs
 off, crash reasons, a check that mass randomization reaches MuJoCo, a check of the
-sensor model (delay exact, noise std as configured), and a check of the wake transport
-delay (the peak thrust loss of a pass arrives later by the modelled delay).
+sensor model (delay exact, noise std as configured), a check of the wake transport
+delay (the peak thrust loss of a pass arrives later by the modelled delay), and a check of
+the buffers pi and phi read (history filled with the reset step, command window order).
 """
 
 import argparse
@@ -211,6 +212,29 @@ def delay_check(num_envs: int = 512, seconds: float = 10.0) -> None:
           f"peak loss {peak[False][1][ok].mean():.3f} without, {peak[True][1][ok].mean():.3f} with")
 
 
+def buffer_check(num_envs: int = 64, steps: int = 20) -> None:
+    """After a reset every history slot holds the first step's entry (hover command as the
+    action); the command window is a_{t-1} .. a_{t-K}, newest first, hover-filled at reset."""
+    torch.manual_seed(0)
+    cfg = EnvCfg(sim=SimCfg(num_envs=num_envs, stagger_first_episode=False),
+                 obs=ObsCfg(bottom_history_len=125, top_history_len=125, action_history_len=8))
+    env = ProxQuadEnv(cfg)
+    obs, h = env.get_obs(), env.get_history()
+    first = {"bottom": torch.cat([obs["proprio"], obs["prev_action"]], -1), "top": obs["top"]}
+    for k, v in h.items():
+        assert torch.equal(v, first[k][:, None].expand_as(v)), f"{k} history not reset-filled"
+    assert (obs["action_hist"] == env.a_hover).all(), "command window not hover-filled"
+    sent = []
+    for _ in range(steps):
+        a = env.a_hover + 0.05 * torch.randn(env.n, 4, device=env.dev)
+        sent.append(a.clamp(-1, 1))
+        obs, _, done, _ = env.step(a)
+    assert not done.any(), "an env finished during the buffer check"
+    want = torch.stack(sent[::-1][:8], 1).flatten(1)
+    assert torch.allclose(obs["action_hist"], want), "command window order"
+    print(f"   history reset-filled ({', '.join(h)}), command window K = 8 newest first: ok")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--num-envs", type=int, default=4096)
@@ -245,6 +269,9 @@ def main():
 
     print("\n== wake transport delay")
     delay_check()
+
+    print("\n== policy buffers")
+    buffer_check()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 """Observation layouts. Each layout is an ordered list of (name, dim); the builders
 concatenate in this order and check the sizes, so the tables below are the spec.
 
-    proprio    x_t      bottom drone's true state          -> bottom history (phi)
+    proprio    x_t      bottom drone's measured state      -> bottom history (phi)
     tracking_err x~_t   bottom drone's tracking errors     -> base policy pi
-    prev_action a_{t-1} bottom drone's previous action    -> base policy pi
+    action_hist         a_{t-1} .. a_{t-K}, newest first   -> base policy pi, critic
     top        o_t^top  top drone: current state + its previous command -> base policy pi,
                         and (as a history) the adaptation modules (Phase 2)
     priv       e_t      privileged environment factors     -> encoder mu (Phase 1 only)
@@ -81,18 +81,22 @@ def layout_dim(layout) -> int:
     return sum(d for _, d in layout)
 
 
-# observations for the actor and critic needed
-POLICY_INPUTS = [
-    ("tracking_err", layout_dim(TRACKING_LAYOUT)),
-    ("prev_action", 4),
-    ("top", layout_dim(TOP_LAYOUT)),
-]
-# critic (asymmetric): the same quantities from the true states, plus e_t ("priv")
-CRITIC_INPUTS = [
-    ("tracking_err_true", layout_dim(TRACKING_LAYOUT)),
-    ("prev_action", 4),
-    ("top_true", layout_dim(TOP_LAYOUT)),
-]
+# observations for the actor and critic; K = ObsCfg.action_history_len (1: a_{t-1} only)
+def policy_inputs(K: int) -> list[tuple[str, int]]:
+    return [("tracking_err", layout_dim(TRACKING_LAYOUT)), ("action_hist", 4 * K),
+            ("top", layout_dim(TOP_LAYOUT))]
+
+
+def critic_inputs(K: int) -> list[tuple[str, int]]:
+    """Asymmetric: the same quantities from the true states, plus e_t ("priv")."""
+    return [("tracking_err_true", layout_dim(TRACKING_LAYOUT)), ("action_hist", 4 * K),
+            ("top_true", layout_dim(TOP_LAYOUT))]
+
+
+def action_history_len(obs_cfg) -> int:
+    """K of a (possibly unpickled) ObsCfg; checkpoints from before the window: 1.
+    vars(): an unpickled old instance would otherwise fall back to the class default."""
+    return vars(obs_cfg).get("action_history_len", 1)
 
 # Pack different parts of tensors
 def pack(layout, parts: dict[str, torch.Tensor]) -> torch.Tensor:

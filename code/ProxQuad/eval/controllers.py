@@ -4,10 +4,10 @@ extras() -> per-step (N,) signals the rollout records next to its own."""
 
 import torch
 
-from ..configs import RobustControllerCfg
+from ..configs import ObsCfg, RobustControllerCfg
 from ..envs import ProxQuadEnv
 from ..envs.controller import RobustGeometricController
-from ..envs.observations import POLICY_INPUTS
+from ..envs.observations import action_history_len, policy_inputs
 from ..models import AdaptationModule, BasePolicy, EnvFactorEncoder
 
 
@@ -110,9 +110,21 @@ class Phase2Policy(Controller):
         return {"z_mse": self.z_mse}
 
 
+def match_obs(obs: ObsCfg, path: str) -> None:
+    """Set the env's observation sizes to a checkpoint's: pi's command window and, for a
+    Phase 2 checkpoint, phi's history lengths."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    obs.action_history_len = action_history_len(ck.get("phase1_cfg", ck["cfg"]).env.obs)
+    if "phi" in ck:
+        o = ck["cfg"].env.obs
+        obs.bottom_history_len, obs.top_history_len = o.bottom_history_len, o.top_history_len
+
+
 def _mu_pi(ck: dict, p1, env: ProxQuadEnv) -> tuple[EnvFactorEncoder, BasePolicy]:
+    K = action_history_len(p1.env.obs)
+    assert env.cfg.obs.action_history_len == K, f"env command window must be {K} (match_obs)"
     encoder = EnvFactorEncoder(env.priv_dim, p1.z_dim, p1.encoder).to(env.dev)
-    policy = BasePolicy(dict(POLICY_INPUTS), p1.z_dim, env.action_dim, p1.policy,
+    policy = BasePolicy(dict(policy_inputs(K)), p1.z_dim, env.action_dim, p1.policy,
                         env.a_hover).to(env.dev)
     encoder.load_state_dict(ck["encoder"])
     policy.load_state_dict(ck["policy"])

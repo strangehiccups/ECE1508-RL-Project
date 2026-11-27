@@ -25,7 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from ..configs import Phase2Cfg
 from ..envs import ProxQuadEnv
-from ..envs.observations import POLICY_INPUTS
+from ..envs.observations import action_history_len, policy_inputs
 from ..envs.scenarios import SCENARIOS
 from ..models import AdaptationModule, BasePolicy, EnvFactorEncoder
 
@@ -36,13 +36,13 @@ class Phase2Trainer:
         self.cfg = cfg
         oc = cfg.env.obs
         assert oc.bottom_history_len > 0 and oc.top_history_len > 0, "Phase 2 needs both histories"
-        self.env = E = ProxQuadEnv(cfg.env)
-
-        # frozen Phase 1 networks
-        ck = torch.load(cfg.phase1_checkpoint, map_location=E.dev, weights_only=False)
+        # frozen Phase 1 networks; the env gets pi's command window from them
+        ck = torch.load(cfg.phase1_checkpoint, map_location="cpu", weights_only=False)
         p1 = ck["cfg"]
+        oc.action_history_len = K = action_history_len(p1.env.obs)
+        self.env = E = ProxQuadEnv(cfg.env)
         self.encoder = EnvFactorEncoder(E.priv_dim, p1.z_dim, p1.encoder)
-        self.policy = BasePolicy(dict(POLICY_INPUTS), p1.z_dim, E.action_dim, p1.policy,
+        self.policy = BasePolicy(dict(policy_inputs(K)), p1.z_dim, E.action_dim, p1.policy,
                                  E.a_hover)
         for name in ("encoder", "policy"):
             net = getattr(self, name)

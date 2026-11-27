@@ -6,18 +6,18 @@ close proximity, where the top drone's downwash costs the bottom drone thrust an
 
 | Phase | Trains | Inputs | Signal |
 |---|---|---|---|
-| 1 | env-factor encoder μ + base policy π | e_t (privileged), x̃_t, a_{t-1}, o_t^top | RL (algorithm TBD) |
+| 1 | env-factor encoder μ + base policy π | e_t (privileged), x̃_t, a_{t-K..t-1}, o_t^top | RL (algorithm TBD) |
 | 2 | adaptation module φ (π, μ frozen) | bottom (x, a) history + top (state, command) history | regress ẑ_t onto z_t = μ(e_t) |
 
-    Phase 1:  z_t = μ(e_t)                         a_t = π(x̃_t, a_{t-1}, o_t^top, z_t)
-    Phase 2:  ẑ_t = φ(bottom hist, top hist)       a_t = π(x̃_t, a_{t-1}, o_t^top, ẑ_t)
+    Phase 1:  z_t = μ(e_t)                         a_t = π(x̃_t, a_{t-K..t-1}, o_t^top, z_t)
+    Phase 2:  ẑ_t = φ(bottom hist, top hist)       a_t = π(x̃_t, a_{t-K..t-1}, o_t^top, ẑ_t)
 
-x_t is the bottom drone's true state (v, R, ω; `obs["proprio"]`), stored in φ's history;
-x̃_t is its tracking error against the flat reference (`obs["tracking_err"]`), π's input.
-π sees both drones: (x̃_t, a_{t-1}) of the bottom drone and
+x_t is the bottom drone's measured state (v, R, ω; `obs["proprio"]`), stored in φ's
+history; x̃_t is its tracking error against the flat reference (`obs["tracking_err"]`),
+π's input. π sees both drones: (x̃_t, its last K = 8 commands) of the bottom drone and
 o_t^top, the top drone's current state + previous command. o_t^top is measured at
-deployment (anticipation, collision avoidance), so it is not privileged. e_t (30 dims by
-default: 24, + 5 with the rotor lag, + 1 with the wake transport delay) holds what cannot
+deployment (anticipation, collision avoidance), so it is not privileged. e_t (27 dims by
+default: 25, + 1 with the rotor lag, + 1 with the wake transport delay) holds what cannot
 be measured: the bottom drone's parameters, the wake's settings and the downwash over the
 next step. φ reads both drones' histories: the top one
 lets it tell "heavy" from "in the wake" and predict the downwash.
@@ -181,8 +181,12 @@ Confirmed 2026-11-18 (simulation first; hardware questions deferred):
   attitude (a small body-frame rotation) and body rate; `noise_scale` multiplies all four.
   π's inputs, φ's histories, the baselines (`env.measured_state`) and the top drone's own
   controller use it; rewards, terminations, e_t, the critic's inputs and evaluation metrics
-  keep the true states. The bottom drone's delay is in e_t (`sensor_delay`, steps / range
-  midpoint; 0 without the sensor model). A level in [0, 1] scales the noise and the drawn
+  keep the true states. The bottom drone's delay is in e_t (`sensor_delay`, steps / 4.5,
+  `SensorCfg.delay_norm_steps`, fixed so training and evaluation ranges encode a delay
+  alike; 0 without the sensor model). Training (2026-11-23, user) draws the bottom drone's
+  delay from {3, …, 8} (12–32 ms, `TRAIN_BOTTOM_DELAY_STEPS` in `Phase1Cfg.env` /
+  `Phase2Cfg.env`) for margin: π flipped mostly at 6 steps. Evaluation keeps 3–6; the top
+  drone stays at 3–6 (its delay showed no effect on crashes). A level in [0, 1] scales the noise and the drawn
   delays; Phase 1 ramps it linearly over `Phase1Cfg.sensor_ramp_iterations` = 500 (Phase 2
   and evaluation: 1). The noise has its own generator, seeded at each full reset from
   `torch.initial_seed()`, so the episodes do not depend on the sensor settings and every
@@ -285,7 +289,11 @@ the top drone directly) would compensate for downwash that has not arrived yet. 
 Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCfg` /
 `AdaptationCfg`), following RMA; activations ELU (RMA does not state them):
 - μ: e_t (24 in RMA terms; 27 on dev_RMA) → 256 → 128 → z (8), linear output.
-- π: [x̃_t, a_{t-1}, o_t^top] (44) + z (8) → 128 → 128 → 4. Diagonal Gaussian: the network
+- π: [x̃_t, a_{t-1} .. a_{t-8}, o_t^top] (72) + z (8) → 128 → 128 → 4. The command window
+  (2026-11-23, `ObsCfg.action_history_len` K = 8, newest first, hover-filled at reset)
+  replaces a_{t-1}: K = the longest training delay, so it holds every command sent since
+  the delayed measurement, and it tells π about the rotor state now that the rotor speeds
+  are out of e_t. Checkpoints from before read as K = 1 (a_{t-1} only). Diagonal Gaussian: the network
   gives the mean, log σ is a learned vector independent of the state (no variance
   network; PPO-style, as in `code/quad`), σ₀ = 0.2 throttle, clamped to e^[−5, 0.5].
   Phase 2 and deployment use the mean.
@@ -321,15 +329,19 @@ Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCf
     the bound stays K), starting at 0.05: the untrained π then flies like hover + the
     exploration noise. `BasePolicy.lipschitz_bound()` reports |g| × the exact product of
     the layer norms (to log during training).
-- Critic: separate MLP 256 → 256, asymmetric: [x̃_t, a_{t-1}, o_t^top, e_t] with the raw
-  e_t, not μ, so the value loss does not shape z. x̃_t and o_t^top come from the true
-  states (`CRITIC_INPUTS`: `tracking_err_true`, `top_true`), not the measured ones.
+- Critic: separate MLP 256 → 256, asymmetric: [x̃_t, a_{t-1} .. a_{t-8}, o_t^top, e_t] with
+  the raw e_t, not μ, so the value loss does not shape z. x̃_t and o_t^top come from the
+  true states (`critic_inputs`: `tracking_err_true`, `top_true`), not the measured ones.
 - z: 8 dims as in RMA (12 from 2026-11-22 to 11-23, while e_t held the rotor speeds).
 - φ: per-step 2-layer MLP embedding (32) **per drone**, the two stacked as 64 channels,
   then RMA's 3 × 1-D conv → flatten → linear. Every conv layer mixes both drones at each
   time step (telling mass from wake needs their correlation). First conv kernel / stride
   8 / 4 → 20 / 10 keeps RMA's 80 ms / 40 ms at 250 Hz; 125 steps give RMA's lengths
-  11 → 7 → 3.
+  11 → 7 → 3. The histories start full (2026-11-23; zeros before): after a reset every slot
+  holds the first step, the reset state with the hover command, as if the drone had
+  hovered there for 0.5 s (on hardware the buffer is full when the policy engages).
+  Two thirds of the z 8 model's flips came in the first 3 s, with ẑ from a zero-padded
+  history.
 - Normalizers (`utils.normalizer.RunningNorm`, an nn.Module) live inside each network, so
   checkpoints carry them. Phase 1 updates μ's, π's and the critic's from each rollout
   (`Phase1Trainer.update_norms`); Phase 2 freezes them and updates only φ's.
@@ -343,7 +355,7 @@ Networks (2026-11-20, `models/`, sizes in `PolicyCfg` / `CriticCfg` / `EncoderCf
     rollout at 4096 envs × 60 steps), so the input map settles within tens of iterations;
     early, crash-heavy data stays in the average. Stopping the updates after N iterations
     would make it fully stationary if needed.
-- Sizes: μ 40 k, π 24 k, critic 84 k, φ 56 k parameters; μ + π + critic forward and
+- Sizes: μ 41 k, π 27 k, critic 92 k, φ 56 k parameters; μ + π + critic forward and
   sample at 4096 envs ≈ 1.8 ms.
 
 Phase 1 training (2026-11-20): **PPO**, own code (not SB3 / TorchRL / rsl_rl), written
@@ -393,10 +405,10 @@ and the sensor model on; sensor level ramped 0 → 1 over the first 500 Phase 1 
 the bottom drone's latency in e_t (27 dims, no rotor speeds since 2026-11-23); the top
 drone on its measured state with the flight gains; the critic on true states; z 8;
 action-rate weight 0.05 → 0.1 (under the measured noise the old policy's |Δa| rose ~10×,
-which at 0.05 already cost as much as its
-tracking error); circles mix; Phase 1 3000 iterations; Phase 2 keeps the 0.5 s window. Not
-done: action history as a π input (user: not yet), actuation dead time (user: not needed),
-the spectral-norm ablation under noise.
+which at 0.05 already cost as much as its tracking error); circles mix; Phase 1 3000 iterations; Phase 2 keeps the 0.5 s window.
+2026-11-23: π's command window (K = 8), bottom delay 3–8 steps in training, φ's histories
+start full. Not done: actuation dead time (user: not needed), the spectral-norm ablation
+under noise, ablations of the three 2026-11-23 changes (trained together).
 
 Planned (not yet): **residual mode** (2026-11-20, deferred by the user). `ActionCfg.mode`
 = "direct" | "residual". Residual: a geometric controller on the bottom drone with

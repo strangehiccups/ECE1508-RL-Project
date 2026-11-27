@@ -315,6 +315,12 @@ class SensorCfg:
     noise_scale: float = 1.0                     # multiplies all four
     bottom_delay_steps: tuple[int, int] = (3, 6)  # uniform integer per episode, inclusive
     top_delay_steps: tuple[int, int] = (3, 6)
+    delay_norm_steps: float = 4.5                # e_t's sensor_delay = bottom delay / this
+
+
+# Training draws the bottom drone's delay from a wider range than the measured 3-6 steps
+# (margin); evaluation keeps SensorCfg's default.
+TRAIN_BOTTOM_DELAY_STEPS = (3, 8)
 
 
 @dataclass
@@ -325,6 +331,9 @@ class ObsCfg:
     # delay (~3 s = 750 steps at 250 Hz, or a downsampled window / GRU; README "Planned").
     bottom_history_len: int = 0
     top_history_len: int = 0
+    # pi and the critic see the last K commands a_{t-1} .. a_{t-K}; K = the longest training
+    # delay, so the window holds every command sent since the delayed measurement
+    action_history_len: int = 8
 
 
 @dataclass
@@ -416,7 +425,8 @@ class PPOCfg:
 @dataclass
 class Phase1Cfg:
     """Phase 1: jointly train env-factor encoder mu and base policy pi with PPO."""
-    env: EnvCfg = field(default_factory=EnvCfg)
+    env: EnvCfg = field(default_factory=lambda: EnvCfg(
+        sensors=SensorCfg(bottom_delay_steps=TRAIN_BOTTOM_DELAY_STEPS)))
     z_dim: int = 8                # mu(e_t: 27 dims on dev_RMA) -> z_t, as in RMA
     sensor_ramp_iterations: int = 500   # sensor noise and latency ramped 0 -> 1 linearly
     policy: PolicyCfg = field(default_factory=PolicyCfg)
@@ -443,7 +453,8 @@ class Phase2Cfg:
     0.5 s = 125 steps, as in RMA.
     """
     env: EnvCfg = field(default_factory=lambda: EnvCfg(
-        obs=ObsCfg(bottom_history_len=125, top_history_len=125)))
+        obs=ObsCfg(bottom_history_len=125, top_history_len=125),
+        sensors=SensorCfg(bottom_delay_steps=TRAIN_BOTTOM_DELAY_STEPS)))
     adaptation_decimation: int = 2
     adaptation: AdaptationCfg = field(default_factory=AdaptationCfg)
     phase1_checkpoint: str = "runs/phase1_circles/model.pt"

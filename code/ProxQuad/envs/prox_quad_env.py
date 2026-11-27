@@ -123,6 +123,8 @@ class ProxQuadEnv:
         m = cfg.motor
         self.a_hover = 2 * (self.bottom.omega_hover - m.omega_idle) / (m.omega_max - m.omega_idle) - 1     # normalized hover command for bottom drone
         self.prev_action = torch.full((n, 4), self.a_hover, device=self.dev)                               # previous action of bottom drone
+        self.action_hist = torch.full((n, cfg.obs.action_history_len, 4), self.a_hover,
+                                      device=self.dev)   # a_{t-1} .. a_{t-K}, newest first
         self.top_a_hover = 2 * (self.top.omega_hover - m.omega_idle) / (m.omega_max - m.omega_idle) - 1    # normalized hover command for top drone
         self.top_prev_action = torch.full((n, 4), self.top_a_hover, device=self.dev)                       # previous action of top drone
         
@@ -213,6 +215,7 @@ class ProxQuadEnv:
         # Update the previous actions for the next step
         # The normalized actions that are used to fly the drones
         self.prev_action = a.clone()
+        self.action_hist = torch.cat([a[:, None], self.action_hist[:, :-1]], dim=1)
         self.top_prev_action = self.omega_to_action(self._top_cmd).clamp(-1.0, 1.0)
 
         # Reset the finished envs and prepare the next observation.
@@ -300,6 +303,7 @@ class ProxQuadEnv:
         self.steps[ids] = 0
         self.episode_len[ids] = self.max_steps
         self.prev_action[ids] = self.a_hover
+        self.action_hist[ids] = self.a_hover
         self.top_prev_action[ids] = self.top_a_hover
         if self.history is not None:
             self.history.reset(ids)
@@ -339,6 +343,8 @@ class ProxQuadEnv:
         else:
             self._obs["tracking_err_true"] = pack(TRACKING_LAYOUT, self._tracking_errors(bot))
             self._obs["top_true"] = self._top_obs(bot, top)
+        if self.history is not None:
+            self.history.fill_fresh(self._obs, self.prev_action)
 
     def _top_obs(self, bot: DroneState, top: DroneState) -> torch.Tensor:
         rel_pos, rel_vel = top.pos - bot.pos, top.vel - bot.vel
@@ -369,9 +375,8 @@ class ProxQuadEnv:
             "wake_gain": wake[:, 0], "wake_spread": wake[:, 1],
             "rotor_wake_coeff": wake[:, 2], "airframe_cda": wake[:, 3],
             "wake_delay_scale": wake[:, 4:],
-            "sensor_delay": (self.sensors.delay["bottom"].float() / (sum(
-                self.cfg.sensors.bottom_delay_steps) / 2) if self.sensors else
-                torch.zeros(self.n, device=self.dev)),
+            "sensor_delay": (self.sensors.delay["bottom"].float() / self.cfg.sensors.delay_norm_steps
+                             if self.sensors else torch.zeros(self.n, device=self.dev)),
             "rotor_thrust_ratio": self._aero.thrust_ratio,
             "wake_drag": self._aero.drag / W,
         }
@@ -379,6 +384,7 @@ class ProxQuadEnv:
         
         return {"proprio": proprio, "tracking_err": tracking,
                 "prev_action": self.prev_action.clone(),
+                "action_hist": self.action_hist.flatten(1).clone(),
                 "top": self._top_obs(bot, top), "priv": priv}
 
     def _substeps(self) -> None:
